@@ -11,13 +11,15 @@ and saves into OUT/<event_id>/:
     <task>.zip                 the task's track archive: the scored IGC package when there is one
                                (media/task/archive/...), otherwise the live-tracking archive
                                (media/task/live_archive/...)
-    <task>_results.html        the task's results page (/results/task<task>/day/overall)
+    <task>_results.html        the task's results page (/results/task<task>/day/<category>, choosing a
+                               category that lists every pilot, such as overall or open)
 
 and writes OUT/airtribune_catalog.csv with one row per task. Safe to stop and rerun: files already
 on disk are skipped, and a file the server keeps refusing is noted in OUT/failed.txt and tried
 again on the next run. One request at a time with a pause between them.
 
     python3 scripts/airtribune.py /path/to/airtribune_igc
+    python3 scripts/airtribune.py /path/to/airtribune_igc --results-only   # only missing results pages
 """
 
 import argparse
@@ -37,7 +39,8 @@ BASE = "https://airtribune.com"
 PARAGLIDING = 0  # Airtribune's "sport" code; 2 is hang gliding
 ZIP_RE = re.compile(r"https?://[^\"' ]+?/media/task/(archive|live_archive)/\d{4}/\d{2}/(\d+)/[^\"' ]+?\.zip")
 COLUMNS = ["event_id", "slug", "title", "country", "place", "lat", "lon", "start_date", "end_date",
-           "fai_category", "task", "kind", "zip_url"]
+           "fai_category", "task", "kind", "zip_url", "results_category"]
+PREFERRED = ["overall", "open", "general", "all", "pg", "paragliding"]  # results categories that list everyone
 
 
 def event_list(page):
@@ -68,11 +71,19 @@ def task_archives(page):
     return found
 
 
+def results_category(page, task):
+    """The category whose day results to save for a task: the one listing every pilot when there is one
+    (overall, open), otherwise the first listed. Airtribune names categories per event."""
+    found = list(dict.fromkeys(re.findall(rf"/results/task{task}/(?:day|comp)/([\w-]+)", page)))
+    return next((c for c in PREFERRED if c in found), found[0] if found else "overall")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("out", type=Path, help="folder for the downloads")
     parser.add_argument("--pause", type=float, default=2.0, help="seconds between requests (default 2)")
     parser.add_argument("--min-free-gb", type=float, default=2.0, help="stop when free space drops below this")
+    parser.add_argument("--results-only", action="store_true", help="only fetch missing task results pages")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -96,7 +107,7 @@ def main():
                          "country": (event.get("country") or {}).get("ioc_code", ""), "place": event.get("place"),
                          "lat": event.get("lat"), "lon": event.get("lon"), "start_date": event.get("start_date"),
                          "end_date": event.get("end_date"), "fai_category": event.get("fai_category"),
-                         "task": task, "kind": kind, "zip_url": url})
+                         "task": task, "kind": kind, "zip_url": url, "results_category": results_category(page, task)})
         if new:
             time.sleep(args.pause)
         if n % 50 == 0:
@@ -112,8 +123,10 @@ def main():
     total = 0
     for i, row in enumerate(rows, 1):
         folder = args.out / str(row["event_id"])
-        targets = [(row["zip_url"], folder / f"{row['task']}.zip"),
-                   (f"{BASE}/{row['slug']}/results/task{row['task']}/day/overall", folder / f"{row['task']}_results.html")]
+        targets = [(f"{BASE}/{row['slug']}/results/task{row['task']}/day/{row['results_category']}",
+                    folder / f"{row['task']}_results.html")]
+        if not args.results_only:
+            targets.insert(0, (row["zip_url"], folder / f"{row['task']}.zip"))
         for url, dest in targets:
             if dest.exists() and (dest.suffix != ".zip" or zip_ok(dest)):
                 continue
