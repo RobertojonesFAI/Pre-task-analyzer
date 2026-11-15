@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Download Flymaster competition tasks: IGC packages, task definitions and results pages.
 
-Reads the catalog made by the group scan (one row per task: group, task, title, date) and,
-for every task, saves into OUT/<group>/:
+Reads the catalog made by scripts/scan_flymaster.py and, for every paragliding task with an IGC
+package (discipline PG, zip 1; --all keeps hang gliding too), saves into OUT/<group>/:
 
     <task>.zip           IGC package of the task (every pilot's track)
     <task>.xctsk         task definition (turnpoints, cylinders, start, goal)
@@ -13,7 +13,7 @@ between them, so the servers are not loaded. Stops before the disk fills up.
 
 Uses only the Python standard library.
 
-    python3 scripts/download_flymaster.py data/flymaster_catalog.csv /Volumes/Data/flymaster
+    python3 scripts/download_flymaster.py flymaster_catalog.csv /path/to/flymaster_igc
 """
 
 import argparse
@@ -67,14 +67,17 @@ def zip_ok(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("catalog", type=Path, help="CSV with columns group, task (from the group scan)")
+    parser.add_argument("catalog", type=Path, help="CSV from scripts/scan_flymaster.py")
     parser.add_argument("out", type=Path, help="folder for the downloads (an external drive is best)")
     parser.add_argument("--pause", type=float, default=2.0, help="seconds between requests (default 2)")
     parser.add_argument("--min-free-gb", type=float, default=5.0, help="stop when free space drops below this")
     parser.add_argument("--only", choices=["zip", "xctsk", "results"], help="download one kind of file only")
+    parser.add_argument("--all", action="store_true", help="also hang gliding and tasks without a package")
     args = parser.parse_args()
 
     rows = list(csv.DictReader(open(args.catalog, newline="", encoding="utf-8")))
+    if not args.all:
+        rows = [r for r in rows if r.get("zip", "1") == "1" and r.get("discipline", "PG") == "PG"]
     args.out.mkdir(parents=True, exist_ok=True)
     context = ssl.create_default_context()
     kinds = [args.only] if args.only else ["zip", "xctsk", "results"]
