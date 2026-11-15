@@ -20,6 +20,8 @@ The Meet Director always makes the decision; the tool only advises.
 | Route planner | A* over the predicted thermals, with wind and speed-to-fly |
 | Alternatives | Builds candidate tasks from the competition's waypoints under the committee's rules and keeps the ones in the target |
 
+The general thermal and landout model, its labels, features and evaluation are described in [docs/model_design.md](docs/model_design.md).
+
 Data: competition IGC tracks (Flymaster and AirScore, then Airtribune), task definitions and official results; ERA5 and HRRR weather; Copernicus GLO-30 terrain.
 
 ## Repo layout
@@ -27,6 +29,7 @@ Data: competition IGC tracks (Flymaster and AirScore, then Airtribune), task def
 ```
 notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
+docs/        design notes (docs/model_design.md: the general model)
 data/        small tables only (catalogs); tracks live in Google Drive
 ```
 
