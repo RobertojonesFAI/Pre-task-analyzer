@@ -20,7 +20,7 @@ The Meet Director always makes the decision; the tool only advises.
 | Route planner | A* over the predicted thermals, with wind and speed-to-fly |
 | Alternatives | Builds candidate tasks from the competition's waypoints under the committee's rules and keeps the ones in the target |
 
-Data: competition IGC tracks (Flymaster first, then Airtribune and AirScore), task definitions and official results; ERA5 and HRRR weather; Copernicus GLO-30 terrain.
+Data: competition IGC tracks (Flymaster and AirScore, then Airtribune), task definitions and official results; ERA5 and HRRR weather; Copernicus GLO-30 terrain.
 
 ## Repo layout
 
@@ -35,5 +35,6 @@ data/        small tables only (catalogs); tracks live in Google Drive
 | # | File | What it does | Output |
 |---|------|--------------|--------|
 | 1 | `notebooks/01_download_flymaster.ipynb` | Lists every Flymaster task with a public IGC package (`scripts/scan_flymaster.py`), then downloads each paragliding task into the project's Drive folder: IGC package, task definition and results page (`scripts/download_flymaster.py`) | `flymaster_igc/flymaster_catalog.csv` and `flymaster_igc/<group>/` in Drive |
+| 2 | `notebooks/02_download_airscore.ipynb` | Downloads every finished paragliding competition on FAI AirScore (`scripts/airscore.py`): IGC package and results page per task | `airscore_igc/airscore_catalog.csv` and `airscore_igc/<comp_id>/` in Drive |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
