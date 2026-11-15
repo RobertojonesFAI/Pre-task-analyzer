@@ -51,6 +51,16 @@ def clean(df):
     return df
 
 
+def parse(fn, *args):
+    """Run one task parser; a page that cannot be read gives a task without results instead of
+    stopping the build."""
+    try:
+        return fn(*args)
+    except Exception as e:
+        print(f"    could not read the results of {fn.__name__}{args[:2]}: {type(e).__name__}: {e}", flush=True)
+        return None
+
+
 def read_csv(path):
     if not Path(path).exists():
         return []
@@ -72,7 +82,8 @@ def collect_tasks(root):
     for group, rows in by_group.items():
         first = None
         for r in rows:
-            task, res = sources.flymaster_task(group, r["task"], fm / group, r)
+            task, res = parse(sources.flymaster_task, group, r["task"], fm / group, r) or \
+                sources.flymaster_task(group, r["task"], Path("/nonexistent"), r)
             tasks.append(task)
             results += res
             jobs.append(("flymaster", task["task_key"], str(fm / group / f"{r['task']}.zip")))
@@ -92,7 +103,8 @@ def collect_tasks(root):
     for comp_id, rows in by_comp.items():
         first = None
         for r in rows:
-            task, res = sources.airscore_task(comp_id, r["task"], asc / comp_id)
+            task, res = parse(sources.airscore_task, comp_id, r["task"], asc / comp_id) or \
+                sources.airscore_task(comp_id, r["task"], Path("/nonexistent"))
             tasks.append(task)
             results += res
             jobs.append(("airscore", task["task_key"], str(asc / comp_id / f"{r['task']}.zip")))
@@ -112,7 +124,8 @@ def collect_tasks(root):
         pilots = sources.airtribune_pilots(page.read_text(encoding="utf-8", errors="replace")) if page.exists() else {}
         first = None
         for r in rows:
-            task, res = sources.airtribune_task(event_id, r["task"], at / event_id, pilots, r.get("zip_url", ""))
+            task, res = parse(sources.airtribune_task, event_id, r["task"], at / event_id, pilots, r.get("zip_url", "")) \
+                or sources.airtribune_task(event_id, r["task"], Path("/nonexistent"), pilots, r.get("zip_url", ""))
             task["track_kind"] = r.get("kind")
             tasks.append(task)
             results += res

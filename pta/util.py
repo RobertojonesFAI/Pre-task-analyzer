@@ -58,8 +58,16 @@ def read_tables(page):
         warnings.simplefilter("ignore")
         try:
             return pd.read_html(io.StringIO(page))
-        except ValueError:
+        except ValueError:  # no tables
             return []
+        except Exception:  # one malformed table spoils the whole page: read them one by one
+            tables = []
+            for chunk in re.findall(r"<table\b.*?</table>", page, flags=re.S | re.I):
+                try:
+                    tables += pd.read_html(io.StringIO(chunk))
+                except Exception:
+                    continue
+            return tables
 
 
 def js_value(text, marker):
