@@ -22,7 +22,7 @@ The Meet Director always makes the decision; the tool only advises.
 
 The general thermal and landout model, its labels, features and evaluation are described in [docs/model_design.md](docs/model_design.md).
 
-Data: competition IGC tracks (Flymaster and AirScore, then Airtribune), task definitions and official results; ERA5 and HRRR weather; Copernicus GLO-30 terrain.
+Data: competition IGC tracks (Flymaster, AirScore and Airtribune), task definitions and official results; ERA5 and HRRR weather; Copernicus GLO-30 terrain.
 
 ## Repo layout
 
@@ -39,5 +39,6 @@ data/        small tables only (catalogs); tracks live in Google Drive
 |---|------|--------------|--------|
 | 1 | `notebooks/01_download_flymaster.ipynb` | Lists every Flymaster task with a public IGC package (`scripts/scan_flymaster.py`), then downloads each paragliding task into the project's Drive folder: IGC package, task definition and results page (`scripts/download_flymaster.py`) | `flymaster_igc/flymaster_catalog.csv` and `flymaster_igc/<group>/` in Drive |
 | 2 | `notebooks/02_download_airscore.ipynb` | Downloads every finished paragliding competition on FAI AirScore (`scripts/airscore.py`): IGC package and results page per task | `airscore_igc/airscore_catalog.csv` and `airscore_igc/<comp_id>/` in Drive |
+| 3 | `notebooks/03_download_airtribune.ipynb` | Downloads every past paragliding event on Airtribune, 2012 to today (`scripts/airtribune.py`), with the administrators' permission: track archive and results page per task | `airtribune_igc/airtribune_catalog.csv` and `airtribune_igc/<event_id>/` in Drive |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
