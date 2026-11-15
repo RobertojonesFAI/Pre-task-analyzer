@@ -34,6 +34,6 @@ data/        small tables only (catalogs); tracks live in Google Drive
 
 | # | File | What it does | Output |
 |---|------|--------------|--------|
-| 1 | `notebooks/01_download_flymaster.ipynb` | Downloads every task in `data/flymaster_catalog.csv` into the project's Drive folder: IGC package, task definition and results page | `flymaster_igc/<group>/` in Drive |
+| 1 | `notebooks/01_download_flymaster.ipynb` | Lists every Flymaster task with a public IGC package (`scripts/scan_flymaster.py`), then downloads each paragliding task into the project's Drive folder: IGC package, task definition and results page (`scripts/download_flymaster.py`) | `flymaster_igc/flymaster_catalog.csv` and `flymaster_igc/<group>/` in Drive |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
