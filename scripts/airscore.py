@@ -9,7 +9,8 @@ competition this script reads its page, finds its tasks, and saves into OUT/<com
                          results and the task definition
 
 and writes OUT/airscore_catalog.csv with one row per task. Safe to stop and rerun: files
-already on disk are skipped. One request at a time with a pause between them.
+already on disk are skipped, and a file the server keeps refusing is noted in
+OUT/failed.txt and tried again on the next run. One request at a time with a pause between them.
 
     python3 scripts/airscore.py /path/to/airscore_igc
 """
@@ -26,7 +27,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from download_flymaster import fetch, zip_ok  # noqa: E402  same downloader, same rules
+from download_flymaster import fetch, log_failure, zip_ok  # noqa: E402  same downloader, same rules
 
 BASE = "https://airscore.fai.org"
 USER_AGENT = "pre-task-analyzer research downloader (academic, non-commercial)"
@@ -40,7 +41,10 @@ def text(fragment):
 def get_text(url, dest, context):
     """Download url to dest (reusing the downloader) and return its text."""
     if not dest.exists():
-        fetch(url, dest, context)
+        try:
+            fetch(url, dest, context)
+        except RuntimeError as e:
+            log_failure(dest.parent.parent, e)
     return dest.read_text(encoding="utf-8", errors="replace") if dest.exists() else ""
 
 
@@ -92,7 +96,11 @@ def main():
             free_gb = shutil.disk_usage(args.out).free / 1e9
             if free_gb < args.min_free_gb:
                 sys.exit(f"Stopping: only {free_gb:.1f} GB free on the destination disk.")
-            size = fetch(url, dest, context)
+            try:
+                size = fetch(url, dest, context)
+            except RuntimeError as e:
+                log_failure(args.out, e)
+                continue
             if dest.suffix == ".zip" and size and not zip_ok(dest):
                 print(f"    {dest.name}: not a valid zip, removed")
                 dest.unlink()

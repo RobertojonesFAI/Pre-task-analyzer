@@ -8,7 +8,8 @@ package (discipline PG, zip 1; --all keeps hang gliding too), saves into OUT/<gr
     <task>.xctsk         task definition (turnpoints, cylinders, start, goal)
     <task>_results.html  official task results page (ranks, goal, times)
 
-Safe to stop and rerun: files already on disk are skipped. One request at a time with a pause
+Safe to stop and rerun: files already on disk are skipped. A file the server keeps refusing
+(for example a 500 error) is noted in OUT/failed.txt and skipped, and is tried again on the next run. One request at a time with a pause
 between them, so the servers are not loaded. Stops before the disk fills up.
 
 Uses only the Python standard library.
@@ -57,6 +58,13 @@ def fetch(url, dest, context, retries=3):
     raise RuntimeError(f"failed after {retries} tries: {url}")
 
 
+def log_failure(out, error):
+    """Note a file the server would not give, so the run can go on; rerun later to retry it."""
+    print(f"    skipped: {error}", flush=True)
+    with open(Path(out) / "failed.txt", "a", encoding="utf-8") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\t{error}\n")
+
+
 def zip_ok(path):
     try:
         with zipfile.ZipFile(path) as z:
@@ -101,7 +109,11 @@ def main():
             if free_gb < args.min_free_gb:
                 print(f"Stopping: only {free_gb:.1f} GB free on the destination disk.")
                 sys.exit(1)
-            size = fetch(url_pattern.format(group=group, task=task), dest, context)
+            try:
+                size = fetch(url_pattern.format(group=group, task=task), dest, context)
+            except RuntimeError as e:
+                log_failure(args.out, e)
+                continue
             if kind == "zip" and size and not zip_ok(dest):
                 print(f"    {dest.name}: not a valid zip, removed")
                 dest.unlink()
