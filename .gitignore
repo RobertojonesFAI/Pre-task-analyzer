@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# Data stays in Google Drive, not in git (small tables under data/ are fine)
+data/raw/
+*.zip
+*.igc
+*.part
+
+# OS files
+.DS_Store
