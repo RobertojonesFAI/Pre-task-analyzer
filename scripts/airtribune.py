@@ -125,8 +125,8 @@ def main():
             except RuntimeError as e:
                 log_failure(args.out, e)
                 continue
-            if dest.suffix == ".zip" and size and not zip_ok(dest):
-                print(f"    {dest.name}: not a valid zip, removed")
+            if dest.suffix == ".zip" and dest.exists() and not zip_ok(dest):
+                print(f"    {dest.name}: empty or not a valid zip, removed")
                 dest.unlink()
                 size = 0
             total += size
