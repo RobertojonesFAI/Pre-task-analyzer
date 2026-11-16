@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pta import grid  # noqa: E402
 
 CDS_URL = "https://cds.climate.copernicus.eu/api"
-BOX_DEG = 12.0           # sites flown in one month are grouped into boxes up to this size
+BOX_DEG = 25.0           # sites flown in one month are grouped into boxes up to this size
 HOURS = [f"{h:02d}:00" for h in range(24)]
 LEVELS = ["925", "850", "700", "600", "500"]
 
@@ -118,8 +118,10 @@ def site_boxes(db):
             for s, g in chips.groupby("site_id")}
 
 
-def plan(db):
-    """Requests: one per (dataset, month, regional group of sites)."""
+def plan(db, box_deg=BOX_DEG, datasets=tuple(DATASETS)):
+    """Requests: one per (dataset, month, regional group of sites). The CDS works through a few
+    requests per user at a time, so fewer, larger requests finish sooner. Ordered by dataset
+    (most useful first), then month."""
     days, boxes = site_days(db), site_boxes(db)
     by_month = {}
     for site, ds in days.items():
@@ -134,7 +136,7 @@ def plan(db):
             b = boxes[site]
             for g in groups:
                 u = (min(g[0][0], b[0]), max(g[0][1], b[1]), min(g[0][2], b[2]), max(g[0][3], b[3]))
-                if u[1] - u[0] <= BOX_DEG and u[3] - u[2] <= BOX_DEG:
+                if u[1] - u[0] <= box_deg and u[3] - u[2] <= box_deg:
                     g[0] = u
                     g[1][site] = sites[site]
                     break
@@ -142,10 +144,11 @@ def plan(db):
                 groups.append([b, {site: sites[site]}])
         for i, (box, members) in enumerate(groups):
             all_days = sorted(set().union(*members.values()))
-            for key in DATASETS:
+            for key in datasets:
                 jobs.append({"dataset": key, "year": year, "month": month, "days": all_days, "box": box,
-                             "sites": sorted(members), "name": f"{year}-{month:02d}_{i:02d}"})
-    return jobs
+                             "sites": sorted(members), "name": f"{year}-{month:02d}_b{int(box_deg)}_{i:02d}"})
+    order = {k: i for i, k in enumerate(DATASETS)}
+    return sorted(jobs, key=lambda j: (order[j["dataset"]], j["year"], j["month"], j["name"]))
 
 
 def request(job):
@@ -167,6 +170,39 @@ def raw_path(weather, job):
     return weather / "raw" / job["dataset"] / f"{job['name']}.nc"
 
 
+def have(weather, job):
+    """Already downloaded: this request's file, or files from an earlier run with another box size
+    whose boxes, together, cover all of this request's sites for the month (recorded in the
+    .sites.json written next to each file)."""
+    if raw_path(weather, job).exists():
+        return True
+    import json
+
+    folder = weather / "raw" / job["dataset"]
+    covered = set()
+    for meta in folder.glob(f"{job['year']}-{job['month']:02d}_*.sites.json"):
+        if meta.with_name(meta.name.replace(".sites.json", ".nc")).exists():
+            covered |= set(json.loads(meta.read_text()))
+    return set(job["sites"]) <= covered
+
+
+def note_old_files(db, weather):
+    """Files from the first runs (12° boxes, named <year>-<month>_<n>.nc) get their .sites.json,
+    so a run with other boxes does not ask for them again."""
+    import json
+    import re
+
+    old = [p for p in (weather / "raw").glob("*/*.nc") if re.fullmatch(r"\d{4}-\d{2}_\d{2}\.nc", p.name)
+           and not p.with_name(p.name.replace(".nc", ".sites.json")).exists()]
+    if not old:
+        return
+    sites = {f"{j['dataset']}/{j['name'].replace('_b12_', '_')}": j["sites"] for j in plan(db, 12.0)}
+    for p in old:
+        key = f"{p.parent.name}/{p.stem}"
+        if key in sites:
+            p.with_name(p.name.replace(".nc", ".sites.json")).write_text(json.dumps(sites[key]))
+
+
 def download(job, weather, key):
     import cdsapi
 
@@ -177,6 +213,8 @@ def download(job, weather, key):
     tmp = dest.with_suffix(".part")
     client = cdsapi.Client(url=CDS_URL, key=key, quiet=True, progress=False)
     client.retrieve(DATASETS[job["dataset"]]["name"], request(job), str(tmp))
+    import json
+    dest.with_name(dest.name.replace(".nc", ".sites.json")).write_text(json.dumps(job["sites"]))
     tmp.rename(dest)  # may hold a zip of several netCDF files; read() handles both
     return job, "ok"
 
@@ -279,19 +317,25 @@ def main():
     parser.add_argument("db", type=Path, help="database folder (with sites from build_sites.py)")
     parser.add_argument("--weather", type=Path, help="output folder (default DB/weather)")
     parser.add_argument("--parallel", type=int, default=6, help="requests at a time (default 6)")
+    parser.add_argument("--box", type=float, default=BOX_DEG, help=f"largest regional box, degrees (default {BOX_DEG:g})")
+    parser.add_argument("--datasets", default=",".join(DATASETS), help="which datasets, in this order (default single,levels,land)")
     parser.add_argument("--plan-only", action="store_true", help="print the requests and stop")
     parser.add_argument("--convert-only", action="store_true", help="only rebuild the tables from the raw files")
     args = parser.parse_args()
     weather = args.weather or args.db / "weather"
     weather.mkdir(parents=True, exist_ok=True)
 
-    jobs = plan(args.db)
-    todo = [j for j in jobs if not raw_path(weather, j).exists()]
+    datasets = tuple(d for d in args.datasets.split(",") if d in DATASETS)
+    note_old_files(args.db, weather)
+    jobs = plan(args.db, args.box, datasets)
+    todo = [j for j in jobs if not have(weather, j)]
     months = len({(j["year"], j["month"]) for j in jobs})
     print(f"ERA5: {len(jobs) // len(DATASETS):,} regional requests in {months} months × {len(DATASETS)} datasets; "
           f"{len(jobs) - len(todo):,} files already here, {len(todo):,} to ask for", flush=True)
     if args.plan_only:
-        for j in jobs[:: len(DATASETS)][:20]:
+        for b in (12, 20, 25, 35):
+            print(f"  boxes of {b}°: {len(plan(args.db, b, datasets[:1])):,} requests per dataset")
+        for j in [j for j in jobs if j["dataset"] == datasets[0]][:10]:
             print(f"  {j['name']}: {len(j['sites'])} sites, {len(j['days'])} days, box {tuple(round(x, 2) for x in j['box'])}")
         return
 
