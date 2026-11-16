@@ -161,10 +161,11 @@ Competitions grouped by launch: the competition with the most flights founds a s
 | `site_id` | `s` + the chip id of the main launch |
 | `name`, `country` | most common place name of its competitions (or the latest competition's name) |
 | `lat`, `lon`, `south`, `north`, `west`, `east` | main launch and the site's box |
-| `n_events`, `n_flights`, `n_chips` | competitions, analysed flights, chips covered |
+| `n_events`, `n_flights` | competitions and analysed flights |
+| `n_chips`, `n_chips_flown`, `n_chips_outside_area` | chips of the site, chips its flights crossed, and how many of those lie outside the competitions' areas |
 | `first_date`, `last_date`, `events` | first and last competition, and their names |
 
-`event_sites` links each competition (`event_key`) to its `site_id`; competitions without coordinates are left out. `site_chips` lists every chip of each site with its ERA5 point (`era5_lat`, `era5_lon`); a chip can belong to two neighbouring sites.
+`event_sites` links each competition (`event_key`) to its `site_id`; competitions with no turnpoint coordinates and no flights are left out. `site_chips` lists every chip of each site with its ERA5 point (`era5_lat`, `era5_lon`): the chips of the competitions' areas (`in_area`) plus every chip the site's flights crossed for at least a minute in all, with the fixes (`n_fixes`, every 5 s) and flights (`n_flights`) in it, so every flown fix has terrain and weather under it. A chip can belong to two neighbouring sites.
 
 ## cells
 
