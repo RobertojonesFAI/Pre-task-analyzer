@@ -1,6 +1,6 @@
 # Competition database
 
-Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03. They can be read with pandas or queried with SQL through DuckDB, with no database server:
+Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, and by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks. They can be read with pandas or queried with SQL through DuckDB, with no database server:
 
 ```python
 import duckdb
@@ -94,3 +94,49 @@ One row per IGC file in a task package.
 | `error` | why a file could not be read, if it could not |
 
 Use `WHERE duplicate_of IS NULL` to count each flight once.
+
+## flights
+
+One row per unique track (`duplicate_of IS NULL`), from `pta/flight.py`. Times are seconds since 00:00 UTC of the task's date (above 86,400 for flights that end after midnight UTC); heights are GPS altitudes in metres above sea level.
+
+| Column | Meaning |
+|---|---|
+| `track_id`, `task_key`, `source`, `result_id`, `pilot_key` | the track and what it is linked to |
+| `error` | why no flight was found (`no flight found`, an unreadable file or package); the other columns are then empty |
+| `step_s`, `quality` | time step the track was resampled to (the logger's usual interval) and `high` (≤ 2 s), `medium` (≤ 5 s) or `low` |
+| `t_takeoff`, `lat_takeoff`, `lon_takeoff`, `alt_takeoff` | takeoff |
+| `t_landing`, `lat_landing`, `lon_landing`, `alt_landing` | landing |
+| `duration_s`, `alt_max`, `max_dist_from_takeoff_m` | flight time, highest point, farthest point from takeoff (straight line) |
+| `n_climbs`, `n_thermals`, `thermal_gain_m`, `mean_thermal_rate_ms` | circling climbs, the ones that are thermals, height gained in thermals and their climb rate weighted by time |
+| `circling_share` | share of the flight spent circling |
+
+How the flight is found: the track is cut at every stop (standing still for a minute at a steady altitude, with real fixes rather than a logger gap) and at logger gaps over half an hour, and the flight is the stretch that circles the most. That leaves out the drive up, the wait at launch and the retrieve drive that live-tracking archives often include. The flight ends where the final glide stops sinking at walking pace, or at the next stop.
+
+## climbs
+
+One row per period of sustained circling (at least 30 s and one full turn).
+
+| Column | Meaning |
+|---|---|
+| `track_id`, `task_key`, `seq` | flight and order within it |
+| `t_start`, `t_end`, `duration_s` | when (seconds UTC, as in `flights`) |
+| `lat`, `lon` | mean position |
+| `alt_base`, `alt_top`, `gain_m` | height entering the climb, highest point, gain |
+| `rate_ms`, `net_rate_ms` | climb rate from entry to the top, and from entry to exit |
+| `turns`, `direction` | number of turns, `left` or `right` |
+| `is_thermal` | gains 0.5–8 m/s on average (weaker circling is searching; faster is an altitude error) |
+
+## glides
+
+One row per stretch between climbs (including takeoff to the first climb and the last climb to landing).
+
+| Column | Meaning |
+|---|---|
+| `track_id`, `task_key`, `seq` | flight and order within it |
+| `t_start`, `t_end`, `duration_s` | when |
+| `lat_start`, `lon_start`, `alt_start`, `lat_end`, `lon_end`, `alt_end` | start and end |
+| `distance_m`, `alt_loss_m`, `speed_kmh`, `glide_ratio` | straight-line distance, height lost, ground speed, distance over height lost (empty if no height was lost) |
+
+## fixes
+
+`fixes/<task_key with : as _>.parquet`: the fixes of every flight of a task, every 5 s from takeoff to landing, after cleaning. Columns `track_id`, `t` (seconds UTC), `lat`, `lon`, `alt` (m), `vz` (m/s, over 20 s) and `circling`. These are the input for the cell crossings and landout labels of the next steps.

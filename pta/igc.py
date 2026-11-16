@@ -80,30 +80,42 @@ def summary(data):
 
 
 def fixes(data):
-    """All valid fixes as a dict of numpy arrays: t (seconds since the first fix's midnight, rolls
-    over past 24 h), lat, lon, alt_gps, alt_baro (metres)."""
-    lines = [line for line in _lines(data) if line[:1] == b"B" and len(line) >= 35]
-    n = len(lines)
-    t = np.empty(n, np.int32)
-    lat = np.empty(n, np.float64)
-    lon = np.empty(n, np.float64)
-    gps = np.empty(n, np.int32)
-    baro = np.empty(n, np.int32)
-    k = 0
-    for line in lines:
-        try:
-            tt = int(line[1:3]) * 3600 + int(line[3:5]) * 60 + int(line[5:7])
-            la = int(line[7:9]) + int(line[9:14]) / 60000.0
-            lo = int(line[15:18]) + int(line[18:23]) / 60000.0
-            t[k] = tt
-            lat[k] = -la if line[14:15] == b"S" else la
-            lon[k] = -lo if line[23:24] == b"W" else lo
-            baro[k] = int(line[25:30])
-            gps[k] = int(line[30:35])
-            k += 1
-        except ValueError:
-            continue
-    t, lat, lon, gps, baro = t[:k], lat[:k], lon[:k], gps[:k], baro[:k]
-    if k > 1:  # flights past midnight UTC
+    """All fixes of an IGC file as numpy arrays, parsed in one vectorised pass:
+    t (seconds; rolls over past 24 h for flights across midnight UTC), lat, lon, alt_gps,
+    alt_baro (metres). Malformed records are dropped."""
+    lines = [line[:35] for line in _lines(data) if line[:1] == b"B" and len(line) >= 35]
+    empty = {k: np.empty(0) for k in ("t", "lat", "lon", "alt_gps", "alt_baro")}
+    if not lines:
+        return empty
+    a = np.frombuffer(b"".join(lines), dtype=np.uint8).reshape(-1, 35)
+    d = a.astype(np.int64) - 48
+
+    def num(i, j):
+        out = np.zeros(len(a), np.int64)
+        for k in range(i, j):
+            out = out * 10 + d[:, k]
+        return out
+
+    def digits(i, j):
+        return ((d[:, i:j] >= 0) & (d[:, i:j] <= 9)).all(axis=1)
+
+    def alt(i):  # five characters, optionally a leading minus sign
+        neg = a[:, i] == ord("-")
+        body = np.where(neg, num(i + 1, i + 5), num(i, i + 5))
+        ok = digits(i + 1, i + 5) & (neg | digits(i, i + 1))
+        return np.where(neg, -body, body), ok
+
+    ok = digits(1, 14) & digits(15, 23) & np.isin(a[:, 14], [ord("N"), ord("S")]) & np.isin(a[:, 23], [ord("E"), ord("W")])
+    baro, ok_b = alt(25)
+    gps, ok_g = alt(30)
+    t = num(1, 3) * 3600 + num(3, 5) * 60 + num(5, 7)
+    lat = num(7, 9) + num(9, 14) / 60000.0
+    lon = num(15, 18) + num(18, 23) / 60000.0
+    lat = np.where(a[:, 14] == ord("S"), -lat, lat)
+    lon = np.where(a[:, 23] == ord("W"), -lon, lon)
+    keep = ok & ok_g & (np.abs(lat) <= 90) & (np.abs(lon) <= 180)
+    t, lat, lon = t[keep], lat[keep], lon[keep]
+    gps, baro = np.where(ok_g, gps, 0)[keep], np.where(ok_b, baro, 0)[keep]
+    if len(t) > 1:  # flights past midnight UTC
         t = t + 86400 * np.concatenate([[0], np.cumsum(np.diff(t) < -43200)])
     return {"t": t, "lat": lat, "lon": lon, "alt_gps": gps, "alt_baro": baro}
