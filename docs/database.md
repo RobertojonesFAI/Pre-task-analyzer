@@ -109,6 +109,10 @@ One row per unique track (`duplicate_of IS NULL`), from `pta/flight.py`. Times a
 | `duration_s`, `alt_max`, `max_dist_from_takeoff_m` | flight time, highest point, farthest point from takeoff (straight line) |
 | `n_climbs`, `n_thermals`, `thermal_gain_m`, `mean_thermal_rate_ms` | circling climbs, the ones that are thermals, height gained in thermals and their climb rate weighted by time |
 | `circling_share` | share of the flight spent circling |
+| `same_flight_as` | when this flight is another file's flight (the same competition published by two sources, a live-tracker file on one and the pilot's instrument on the other, or a pilot's second instrument), the `track_id` of the copy kept; empty otherwise. Found by tracks that take off and land together and stay within 100 m of each other (median) over most of their common time |
+| `shared_path` | the track follows the same path as other pilots' tracks (several pilots driven down from launch in one car are recorded as one "flight"); checked against the terrain before use |
+
+Use `WHERE error IS NULL AND same_flight_as IS NULL` to count each flight once.
 
 How the flight is found: the track is cut at every stop (standing still for a minute at a steady altitude, with real fixes rather than a logger gap) and at logger gaps over half an hour, and the flight is the stretch that circles the most. That leaves out the drive up, the wait at launch and the retrieve drive that live-tracking archives often include. The flight ends where the final glide stops sinking at walking pace, or at the next stop.
 
