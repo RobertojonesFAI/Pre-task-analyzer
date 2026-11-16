@@ -2,9 +2,11 @@
 """Group competitions into flying sites and list the chips each site covers.
 
 A competition's area is the box holding its turnpoints (cylinders up to MAX_RADIUS_KM) and, when
-notebook 05 has run, 98 % of its climbs, takeoffs and landings, plus a margin. Competitions whose
-areas mostly overlap (by at least MERGE_OVERLAP of the smaller one) are the same site, so ten
-years of competitions at one place share one terrain and weather extract.
+notebook 05 has run, 98 % of its climbs, takeoffs and landings, plus a margin. Competitions that
+launched within LAUNCH_KM of each other are the same site (their launch is the median takeoff of
+their flights), so ten years of competitions at one place share one terrain and weather extract,
+while neighbouring sites in a mountain range stay apart. A site's area is the union of its
+competitions' areas; neighbouring sites can share chips.
 
 Writes to DB:
 
@@ -30,7 +32,7 @@ MARGIN_DEG = 0.05        # added around each competition's area (about 5 km)
 MAX_RADIUS_KM = 10       # turnpoint cylinders count up to this radius (open-distance goals can be huge)
 POINTS_PCT = 1           # flight points outside the 1st-99th percentiles are ignored (retrieves, GPS errors)
 MAX_SPAN_DEG = 4.0       # an area larger than this is cut down to its flight points (or dropped)
-MERGE_OVERLAP = 0.5      # areas overlapping by this share of the smaller one are one site
+LAUNCH_KM = 20           # competitions launching this close to a site's main launch belong to it
 KM_PER_DEG = 111.32
 
 
@@ -56,15 +58,6 @@ def union(a, b):
     return min(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), max(a[3], b[3])
 
 
-def area(b):
-    return max(b[1] - b[0], 0) * max(b[3] - b[2], 0) * np.cos(np.radians((b[0] + b[1]) / 2))
-
-
-def overlap(a, b):
-    s, n, w, e = max(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), min(a[3], b[3])
-    return area((s, n, w, e)) if n > s and e > w else 0.0
-
-
 def event_boxes(db):
     """{event_key: (south, north, west, east)} and the event table."""
     events, tasks, tps = read(db, "events"), read(db, "tasks"), read(db, "turnpoints")
@@ -81,6 +74,17 @@ def event_boxes(db):
         tps["w"], tps["e"] = tps["lon"] - r_deg / cos, tps["lon"] + r_deg / cos
         for ev, g in tps.groupby("event_key"):
             route[ev] = box_of(np.r_[g["s"], g["n"]], np.r_[g["w"], g["e"]])
+
+    launch = {}
+    if flights is not None and len(flights):
+        f = flights[flights["error"].isna()] if "error" in flights else flights
+        med = f.assign(event_key=f["task_key"].map(task_event)).groupby("event_key")[["lat_takeoff", "lon_takeoff"]].median()
+        launch = {k: (r.lat_takeoff, r.lon_takeoff) for k, r in med.iterrows()}
+    if tps is not None and len(tps):
+        first = tps.sort_values("seq").groupby("task_key").first()
+        first["event_key"] = first.index.map(task_event)
+        for k, r in first.groupby("event_key")[["lat", "lon"]].median().iterrows():
+            launch.setdefault(k, (r.lat, r.lon))
 
     flown = {}
     pts = []
@@ -109,30 +113,28 @@ def event_boxes(db):
             continue
         cos = max(np.cos(np.radians((b[0] + b[1]) / 2)), 0.2)
         boxes[ev] = (b[0] - MARGIN_DEG, b[1] + MARGIN_DEG, b[2] - MARGIN_DEG / cos, b[3] + MARGIN_DEG / cos)
-    return boxes, events, notes
+        launch.setdefault(ev, ((b[0] + b[1]) / 2, (b[2] + b[3]) / 2))
+    return boxes, {k: launch[k] for k in boxes}, events, notes
 
 
-def merge(boxes):
-    """Groups of events whose boxes overlap enough (union-find)."""
-    keys = list(boxes)
-    parent = list(range(len(keys)))
+def km(a, b):
+    la1, lo1, la2, lo2 = map(np.radians, (a[0], a[1], b[0], b[1]))
+    h = np.sin((la2 - la1) / 2) ** 2 + np.cos(la1) * np.cos(la2) * np.sin((lo2 - lo1) / 2) ** 2
+    return 2 * 6371 * np.arcsin(np.sqrt(h))
 
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
 
-    for i in range(len(keys)):
-        for j in range(i + 1, len(keys)):
-            a, b = boxes[keys[i]], boxes[keys[j]]
-            ov = overlap(a, b)
-            if ov and ov >= MERGE_OVERLAP * min(area(a), area(b)):
-                parent[find(i)] = find(j)
-    groups = {}
-    for i, k in enumerate(keys):
-        groups.setdefault(find(i), []).append(k)
-    return list(groups.values())
+def merge(launch, weight):
+    """Groups of events by launch: the event with the most flights founds a site at its launch, and
+    every event launching within LAUNCH_KM of it joins (no chaining from one site to the next)."""
+    sites = []  # (launch, members)
+    for k in sorted(launch, key=lambda k: -weight.get(k, 0)):
+        near = [(km(launch[k], s[0]), s) for s in sites]
+        near = [x for x in near if x[0] <= LAUNCH_KM]
+        if near:
+            min(near, key=lambda x: x[0])[1][1].append(k)
+        else:
+            sites.append((launch[k], [k]))
+    return [(lp, members) for lp, members in sites]
 
 
 def main():
@@ -140,7 +142,7 @@ def main():
     parser.add_argument("db", type=Path, help="database folder")
     args = parser.parse_args()
 
-    boxes, events, notes = event_boxes(args.db)
+    boxes, launch, events, notes = event_boxes(args.db)
     ev = events.set_index("event_key")
     flights = read(args.db, "flights")
     tasks = read(args.db, "tasks")
@@ -150,12 +152,11 @@ def main():
         n_flights = flights[ok]["task_key"].map(tasks.set_index("task_key")["event_key"]).value_counts().to_dict()
 
     sites, links, chips = [], [], []
-    for members in merge(boxes):
+    for (lat_c, lon_c), members in merge(launch, n_flights):
         b = None
         for k in members:
             b = union(b, boxes[k])
-        lat_c, lon_c = (b[0] + b[1]) / 2, (b[2] + b[3]) / 2
-        site_id = f"s{int(grid.chip_id(lat_c, lon_c))}"  # stable: the chip at the site's centre
+        site_id = f"s{int(grid.chip_id(lat_c, lon_c))}"  # stable: the chip of the site's main launch
         while any(s["site_id"] == site_id for s in sites):
             site_id += "b"
         places = Counter(str(ev.at[k, "place"]) for k in members if pd.notna(ev.at[k, "place"]))

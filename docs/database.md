@@ -154,13 +154,13 @@ grid.chip_of_cell(cell_id)
 
 ## sites
 
-Competitions grouped by where they were flown. A competition's area is the box around its turnpoints (cylinders up to 10 km) and the 1st-99th percentiles of its climbs, takeoffs and landings, plus about 5 km; competitions whose areas overlap by at least half of the smaller one are one site.
+Competitions grouped by launch: the competition with the most flights founds a site at its launch (the median takeoff of its flights), and every competition launching within 20 km of it belongs to that site, so neighbouring sites in a mountain range stay apart. A competition's area is the box around its turnpoints (cylinders up to 10 km) and the 1st-99th percentiles of its climbs, takeoffs and landings, plus about 5 km; a site's area is the union of its competitions' areas.
 
 | Column | Meaning |
 |---|---|
-| `site_id` | `s` + the chip id at the site's centre |
+| `site_id` | `s` + the chip id of the main launch |
 | `name`, `country` | most common place name of its competitions (or the latest competition's name) |
-| `lat`, `lon`, `south`, `north`, `west`, `east` | centre and box |
+| `lat`, `lon`, `south`, `north`, `west`, `east` | main launch and the site's box |
 | `n_events`, `n_flights`, `n_chips` | competitions, analysed flights, chips covered |
 | `first_date`, `last_date`, `events` | first and last competition, and their names |
 
