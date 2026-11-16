@@ -50,6 +50,11 @@ No latitude, longitude or site name as features. Everything is a physical or rel
 - times the surface solar radiation ERA5 says actually arrived (clouds) and (1 − albedo) (MODIS 500 m, ERA5-Land), accumulated since sunrise: an energy index per cell and hour
 - land cover (ESA WorldCover 10 m) and snow cover, which decide how much of that energy heats the air
 
+**Wind over the terrain**
+- WindNinja (US Forest Service, open source, validated in complex terrain) run per site on the GLO-30 DEM for a table of inflow cases (for example 16 directions × 3 speeds), interpolated for every hour with the ERA5 wind: speed-up over ridges, channelling in valleys, lee-side sink. Mass-conserving solver everywhere, momentum solver (OpenFOAM) at the main sites.
+- A CFD surrogate trained on OpenFOAM simulations of competition terrain is the extension: wind (u, v, w) at flight heights (for example 10 to 500 m above ground), which WindNinja does not give. Interface: a DEM patch rotated so the inflow comes from one direction, inflow speed (and stability, if the simulations vary it) in; wind as ratios to the inflow speed out; delivered per site as a table by `cell_id`, direction, speed and height. Tested on sites it was not trained on.
+- Both are checked against the wind pilots measured: the drift of their circles while climbing gives the wind at that height and place, thousands of times per site.
+
 **The day as it develops**
 - weather at every hour of the task window, not a daily summary: boundary-layer growth, CAPE and CIN, mid-level humidity and cloud building through the afternoon (overdevelopment), temperatures on pressure levels (inversions that do not break), and the wind at several heights and its timing against each leg of the route
 
