@@ -29,7 +29,7 @@ Data: competition IGC tracks (Flymaster, AirScore and Airtribune), task definiti
 ```
 notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
-pta/         shared code: IGC reader and results parsers
+pta/         shared code: IGC reader, results parsers and flight analysis
 docs/        design notes (model_design.md: the general model; database.md: the tables)
 data/        small tables only (catalogs); tracks live in Google Drive
 ```
@@ -42,5 +42,6 @@ data/        small tables only (catalogs); tracks live in Google Drive
 | 2 | `notebooks/02_download_airscore.ipynb` | Downloads every finished paragliding competition on FAI AirScore (`scripts/airscore.py`): IGC package and results page per task | `airscore_igc/airscore_catalog.csv` and `airscore_igc/<comp_id>/` in Drive |
 | 3 | `notebooks/03_download_airtribune.ipynb` | Downloads every past paragliding event on Airtribune, 2012 to today (`scripts/airtribune.py`), with the administrators' permission: track archive and results page per task | `airtribune_igc/airtribune_catalog.csv` and `airtribune_igc/<event_id>/` in Drive |
 | 4 | `notebooks/04_build_catalog.ipynb` | Fetches the Airtribune task results still missing, then reads every task package and results page into the database tables (`scripts/build_catalog.py`, `pta/`) | `database/*.parquet` in Drive, described in [docs/database.md](docs/database.md) |
+| 5 | `notebooks/05_build_flights.ipynb` | Analyses every unique track (`scripts/build_flights.py`, `pta/flight.py`): cleans GPS and altitude errors, separates the flight from the drive up and the retrieve, and splits it into climbs and glides | `database/flights`, `climbs`, `glides` and `fixes/` (5 s fixes per task) |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
