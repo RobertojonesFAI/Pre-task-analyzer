@@ -45,6 +45,7 @@ data/        small tables only (catalogs); tracks live in Google Drive
 | 4 | `notebooks/04_build_catalog.ipynb` | Fetches the Airtribune task results still missing, then reads every task package and results page into the database tables (`scripts/build_catalog.py`, `pta/`) | `database/*.parquet` in Drive, described in [docs/database.md](docs/database.md) |
 | 5 | `notebooks/05_build_flights.ipynb` | Analyses every unique track (`scripts/build_flights.py`, `pta/flight.py`): cleans GPS and altitude errors, separates the flight from the drive up and the retrieve, and splits it into climbs and glides | `database/flights`, `climbs`, `glides` and `fixes/` (5 s fixes per task) |
 | 6 | `notebooks/06_sites_terrain.ipynb` | Groups the competitions into flying sites (`scripts/build_sites.py`), downloads the Copernicus GLO-30 DEM around them and describes the terrain of every 1 km cell (`scripts/build_terrain.py`, `pta/terrain.py`, `pta/grid.py`) | `database/sites`, `event_sites`, `site_chips`, `cells`; `dem/glo30/` tiles |
+| 7 | `notebooks/07_weather_era5.ipynb` | Hourly ERA5 (single and pressure levels) and ERA5-Land for every site on its competition days, from the Copernicus Climate Data Store (`scripts/era5.py`; needs a free CDS key), and a first check of ERA5's boundary-layer height against real thermal tops | `database/weather/era5_single`, `era5_levels`, `era5_land` |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
 
@@ -52,7 +53,7 @@ The tracks are too big for git. They live in the project's Google Drive folder.
 
 In order of priority for the end of the semester (December 2026):
 
-1. **Weather base (07):** ERA5 and ERA5-Land for every site, hourly, on the days of each competition (Copernicus Climate Data Store).
+1. **Weather base (07, written):** ERA5 and ERA5-Land for every site, hourly, on the days of each competition (Copernicus Climate Data Store).
 2. **Energy on the slopes:** sunlight on each cell's slopes with shading by neighbouring mountains, clouds, albedo and land cover, and the trigger point of each thermal traced back upwind.
    **Wind over the terrain (2b):** WindNinja (US Forest Service) run per site for a table of inflow directions and speeds, giving terrain-scale wind (speed-up over ridges, channelling in valleys, lee sides) for every hour by interpolating with the ERA5 wind.
 3. **Validation against the pilots:** weather sources compared with the ceilings of the real thermals and with radiosonde soundings (IGRA2); terrain winds compared with the wind pilots measured (the drift of their circles in thermals).

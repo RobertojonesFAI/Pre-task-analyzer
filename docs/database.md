@@ -1,6 +1,6 @@
 # Competition database
 
-Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, and by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model. They can be read with pandas or queried with SQL through DuckDB, with no database server:
+Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model, and by `notebooks/07_weather_era5.ipynb` (`scripts/era5.py`) from ERA5. They can be read with pandas or queried with SQL through DuckDB, with no database server:
 
 ```python
 import duckdb
@@ -187,3 +187,22 @@ Terrain of every 1 km cell of the site chips, from the Copernicus GLO-30 DEM (30
 | `relief_5km` | highest minus lowest point within about 5 km |
 | `flat_share`, `sun_<aspect>_<class>` | share of the cell that is flat (under 5°), and the share facing each of 8 directions (`n`, `ne`, …, `nw`) in each slope class (1: 5–15°, 2: 15–30°, 3: over 30°). `pta.terrain.sun_on_cell` turns these into direct sunlight on the ground for any sun position (`pta.terrain.sun_position`) |
 | `nodata_share` | share of the cell with no DEM tile (open sea), set to sea level |
+
+## weather
+
+Hourly ERA5 and ERA5-Land in `database/weather/`, for every site on its competition days and the day before each (`scripts/era5.py`). Times are UTC. Raw downloads stay in `weather/raw/`.
+
+**`era5_single`** and **`era5_levels`**: one row per chip and hour; a chip's weather is the ERA5 grid point at its centre (`pta.grid.chip_centre`).
+
+| Column | Meaning |
+|---|---|
+| `blh_m`, `cloud_base_m` | boundary-layer height and cloud base, metres above the ground |
+| `cape`, `cin`, `k_index` | convective available energy and inhibition (J/kg), K index |
+| `sensible_heat_wm2`, `latent_heat_wm2` | heat fluxes over the hour, W/m², positive from the ground into the air |
+| `sunshine_wm2` | solar radiation reaching the ground over the hour, W/m² |
+| `cloud_total`, `cloud_low`, `cloud_mid`, `cloud_high` | cloud cover, 0–1 |
+| `t2m_c`, `dewpoint_c`, `pressure_hpa`, `rain_mmh` | 2 m temperature and dew point, surface pressure, rain |
+| `u10`, `v10`, `u100`, `v100`, `gust10` | wind at 10 and 100 m (m/s, towards east and north) and gusts |
+| `u_<hPa>`, `v_<hPa>`, `t_<hPa>`, `rh_<hPa>`, `z_<hPa>` | wind, temperature (°C), relative humidity (%) and height (m) at 925, 850, 700, 600 and 500 hPa |
+
+**`era5_land`**: one row per ERA5-Land point (0.1°, `lat`, `lon`, with its `chip_id`) and hour: `sensible_heat_wm2`, `sunshine_wm2` (hourly, from ERA5-Land's daily accumulations), `skin_temp_c`, `soil_moisture` (top layer, m³/m³), `albedo`, `snow_cover` (0–1).
