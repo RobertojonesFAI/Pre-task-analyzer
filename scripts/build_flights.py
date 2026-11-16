@@ -22,7 +22,7 @@ import shutil
 import sys
 import time
 import zipfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -95,10 +95,16 @@ def analyse_task(job):
     return task_key, len(members), sum("error" not in r for r in flights)
 
 
-def gather(parts, table, keys):
-    frames = [pd.read_parquet(parts / f"{safe(k)}.{table}.parquet") for k in keys]
+def gather(parts, table, keys, threads=16):
+    """One table from the per-task parts. Reading thousands of small files from a Drive mount is
+    slow one at a time but fast in parallel, so they are read by a pool of threads."""
+    started = time.time()
+    with ThreadPoolExecutor(threads) as pool:
+        frames = list(pool.map(lambda k: pd.read_parquet(parts / f"{safe(k)}.{table}.parquet"), keys))
     frames = [f.dropna(axis=1, how="all") for f in frames if len(f)]
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    print(f"  read {table}: {len(out):,} rows from {len(keys):,} tasks, {time.time() - started:.0f} s", flush=True)
+    return out
 
 
 def main():
@@ -128,15 +134,18 @@ def main():
     if args.limit:
         jobs = jobs[:args.limit]
     if args.retry_errors:
-        retried = 0
-        for j in jobs:
-            path = parts / f"{safe(j[0])}.flights.parquet"
-            if path.exists():
-                err = pd.read_parquet(path, columns=None).get("error")
-                if err is not None and (err.notna() & (err != "no flight found")).any():
-                    (parts / f"{safe(j[0])}.done").unlink(missing_ok=True)
-                    retried += 1
-        print(f"Retrying {retried} tasks with errors", flush=True)
+        def failed(job):
+            path = parts / f"{safe(job[0])}.flights.parquet"
+            if not path.exists():
+                return False
+            err = pd.read_parquet(path).get("error")
+            return err is not None and bool((err.notna() & (err != "no flight found")).any())
+
+        with ThreadPoolExecutor(16) as pool:
+            retry = [j for j, bad in zip(jobs, pool.map(failed, jobs)) if bad]
+        for j in retry:
+            (parts / f"{safe(j[0])}.done").unlink(missing_ok=True)
+        print(f"Retrying {len(retry)} tasks with errors", flush=True)
     todo = [j for j in jobs if not (parts / f"{safe(j[0])}.done").exists()]
     print(f"Flights: {len(jobs) - len(todo)} tasks already analysed, {len(todo)} to analyse "
           f"({sum(len(j[2]) for j in todo):,} tracks)", flush=True)
@@ -155,12 +164,14 @@ def main():
                 print(f"... {n}/{len(todo)} tasks, {n_tracks:,} tracks, {n_flights:,} flights, "
                       f"{(time.time() - started) / 60:.0f} min", flush=True)
 
+    print("\nCollecting the tables from the task parts", flush=True)
     keys = [j[0] for j in jobs if (parts / f"{safe(j[0])}.done").exists()]
     links = unique[["track_id", "result_id", "pilot_key", "source"]]
     flights = gather(parts, "flights", keys).merge(links, on="track_id", how="left")
     climbs, glides = gather(parts, "climbs", keys), gather(parts, "glides", keys)
     for name, df in [("flights", flights), ("climbs", climbs), ("glides", glides)]:
         df.to_parquet(args.db / f"{name}.parquet", index=False)
+        print(f"  wrote {name}.parquet", flush=True)
 
     ok = flights["error"].isna() if "error" in flights else pd.Series(True, index=flights.index)
     print("\nTables written to", args.db)
