@@ -29,7 +29,7 @@ Data: competition IGC tracks (Flymaster, AirScore and Airtribune), task definiti
 ```
 notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
-pta/         shared code: IGC reader, results parsers and flight analysis
+pta/         shared code: IGC reader, results parsers, flight analysis, the global grid and terrain
 docs/        design notes (model_design.md: the general model; database.md: the tables; deployment.md: how it will be served)
 data/        small tables only (catalogs); tracks live in Google Drive
 ```
@@ -43,5 +43,6 @@ data/        small tables only (catalogs); tracks live in Google Drive
 | 3 | `notebooks/03_download_airtribune.ipynb` | Downloads every past paragliding event on Airtribune, 2012 to today (`scripts/airtribune.py`), with the administrators' permission: track archive and results page per task | `airtribune_igc/airtribune_catalog.csv` and `airtribune_igc/<event_id>/` in Drive |
 | 4 | `notebooks/04_build_catalog.ipynb` | Fetches the Airtribune task results still missing, then reads every task package and results page into the database tables (`scripts/build_catalog.py`, `pta/`) | `database/*.parquet` in Drive, described in [docs/database.md](docs/database.md) |
 | 5 | `notebooks/05_build_flights.ipynb` | Analyses every unique track (`scripts/build_flights.py`, `pta/flight.py`): cleans GPS and altitude errors, separates the flight from the drive up and the retrieve, and splits it into climbs and glides | `database/flights`, `climbs`, `glides` and `fixes/` (5 s fixes per task) |
+| 6 | `notebooks/06_sites_terrain.ipynb` | Groups the competitions into flying sites (`scripts/build_sites.py`), downloads the Copernicus GLO-30 DEM around them and describes the terrain of every 1 km cell (`scripts/build_terrain.py`, `pta/terrain.py`, `pta/grid.py`) | `database/sites`, `event_sites`, `site_chips`, `cells`; `dem/glo30/` tiles |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
