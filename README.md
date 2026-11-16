@@ -54,8 +54,11 @@ In order of priority for the end of the semester (December 2026):
 
 1. **Weather base (07):** ERA5 and ERA5-Land for every site, hourly, on the days of each competition (Copernicus Climate Data Store).
 2. **Energy on the slopes:** sunlight on each cell's slopes with shading by neighbouring mountains, clouds, albedo and land cover, and the trigger point of each thermal traced back upwind.
-3. **Validation against the pilots:** weather sources compared with the ceilings of the real thermals, and with radiosonde soundings (IGRA2).
+   **Wind over the terrain (2b):** WindNinja (US Forest Service) run per site for a table of inflow directions and speeds, giving terrain-scale wind (speed-up over ridges, channelling in valleys, lee sides) for every hour by interpolating with the ERA5 wind.
+3. **Validation against the pilots:** weather sources compared with the ceilings of the real thermals and with radiosonde soundings (IGRA2); terrain winds compared with the wind pilots measured (the drift of their circles in thermals).
 4. **HRRR** as a regional layer for the United States.
 5. **CERRA** as a regional layer for Europe.
+
+Extension: a CFD surrogate trained on OpenFOAM simulations of competition terrain (wind at flight heights, which WindNinja does not give), kept if it beats WindNinja against the winds pilots measured.
 
 Then the cell crossings and labels, the general thermal and landout model, the task model and the route planner (see [docs/model_design.md](docs/model_design.md)).
