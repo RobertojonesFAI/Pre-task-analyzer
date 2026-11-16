@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build the catalog tables of the competition database from the downloaded files.
 
-Reads ROOT/flymaster_igc, ROOT/airscore_igc and ROOT/airtribune_igc (as written by the download
-scripts) and writes Parquet tables to OUT:
+Reads ROOT/flymaster_igc, ROOT/airscore_igc, ROOT/airtribune_igc and ROOT/civlcomps_igc (as written
+by the download scripts) and writes Parquet tables to OUT:
 
     events       one row per competition
     tasks        one row per task (turnpoints as JSON too)
@@ -36,9 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pta import igc, sources  # noqa: E402
 from pta.util import norm_name  # noqa: E402
 
-SOURCE_PRIORITY = {"airscore": 0, "flymaster": 1, "airtribune": 2}  # which copy of a duplicate to keep
+SOURCE_PRIORITY = {"airscore": 0, "flymaster": 1, "airtribune": 2, "civlcomps": 3}  # which copy of a duplicate to keep
 TRACK_ID = {"flymaster": sources.flymaster_track_id, "airtribune": sources.airtribune_track_id,
-            "airscore": lambda member: None}
+            "civlcomps": sources.civlcomps_track_id, "airscore": lambda member: None}
 
 
 def clean(df):
@@ -71,7 +71,7 @@ def read_csv(path):
 # ── Tasks and results ───────────────────────────────────────────────────────
 
 def collect_tasks(root):
-    """(events, tasks, results, jobs) for every task of the three sources that has an IGC package."""
+    """(events, tasks, results, jobs) for every task of the four sources that has an IGC package."""
     events, tasks, results, jobs = [], [], [], []
 
     fm = root / "flymaster_igc"
@@ -135,6 +135,25 @@ def collect_tasks(root):
                                           "start_date": rows[0]["start_date"], "end_date": rows[0]["end_date"]}
         events.append(sources.airtribune_event(e, first))
     print(f"Airtribune: {len(by_event)} competitions, {sum(map(len, by_event.values()))} tasks", flush=True)
+
+    cc = root / "civlcomps_igc"
+    by_event = defaultdict(list)
+    for r in read_csv(cc / "civlcomps_catalog.csv"):
+        if (cc / r["event_id"] / f"{r['task']}.zip").exists():
+            by_event[r["event_id"]].append(r)
+    for event_id, rows in by_event.items():
+        page = cc / event_id / "participants.html"
+        pilots = sources.civlcomps_pilots(page.read_text(encoding="utf-8", errors="replace")) if page.exists() else {}
+        first = None
+        for r in rows:
+            task, res = parse(sources.civlcomps_task, event_id, r["task"], cc / event_id, pilots, r) \
+                or sources.civlcomps_task(event_id, r["task"], Path("/nonexistent"), pilots, r)
+            tasks.append(task)
+            results += res
+            jobs.append(("civlcomps", task["task_key"], str(cc / event_id / f"{r['task']}.zip")))
+            first = first or task
+        events.append(sources.civlcomps_event(rows, first))
+    print(f"civlcomps.org: {len(by_event)} competitions, {sum(map(len, by_event.values()))} tasks", flush=True)
     return events, tasks, results, jobs
 
 

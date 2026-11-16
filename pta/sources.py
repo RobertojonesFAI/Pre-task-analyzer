@@ -1,4 +1,4 @@
-"""Turn the pages saved by the three download scripts into common event, task and result rows.
+"""Turn the pages saved by the download scripts into common event, task and result rows.
 
 Every parser returns plain dicts with the same keys whatever the source:
 
@@ -261,15 +261,18 @@ def airtribune_task_links(results_page, task):
     return list(dict.fromkeys(re.findall(rf"/results/task{task}/day/([\w-]+)", results_page)))
 
 
-def airtribune_task(event_id, task, folder, pilots, zip_url=""):
-    page = _read(Path(folder) / f"{task}_results.html")
+def _fs_task(page, task_key, event_key, source, source_task_id, pilots):
+    """A task from the HTML results page FS (the FAI scoring program) publishes, as Airtribune and
+    civlcomps.org show it: results table, route with coordinates, and a param/value table of task
+    statistics and GAP parameters. pilots ({normalised name or '#<comp id>': registration}) adds
+    CIVL ID, glider and class."""
     tables = read_tables(page)
     params = pair_table(tables)
     turnpoints = []
     tp_table = next((t for t in tables if "Coordinates" in t.columns), None)
     if tp_table is not None:
         for i, r in tp_table.reset_index(drop=True).iterrows():
-            m = re.search(r"Lat:\s*([-\d.]+)\s*Lon:\s*([-\d.]+)", str(r.get("Coordinates")))
+            m = re.search(r"Lat:\s*([-\d.]+)[,;\s]*Lon:\s*([-\d.]+)", str(r.get("Coordinates")))
             no = str(r.get("No", ""))
             kind = "SSS" if "SS" in no else "ESS" if "ES" in no else ""
             turnpoints.append({"seq": i, "name": r.get("Id"), "type": kind,
@@ -279,24 +282,21 @@ def airtribune_task(event_id, task, folder, pilots, zip_url=""):
             turnpoints[0]["type"] = turnpoints[0]["type"] or "TAKEOFF"
             turnpoints[-1]["type"] = "GOAL"
 
-    first_start = str(params.get("first_start_time") or "")
-    date = first_start[:10] if re.match(r"\d{4}-\d{2}-\d{2}", first_start) else None
-    if not date:  # from the archive's file name: igc7706_2026-06-22.zip or 08-01-2018-live.zip
-        m = re.search(r"(\d{4})-(\d{2})-(\d{2})\.zip", zip_url) or re.search(r"(\d{2})-(\d{2})-(\d{4})-live", zip_url)
-        if m:
-            date = "-".join(m.groups()) if len(m.group(1)) == 4 else f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
-    offset = re.search(r"([+-]\d{2}):(\d{2})$", first_start)
+    first_start = str(params.get("first_start_time") or "").strip()
+    iso = re.match(r"\d{4}-\d{2}-\d{2}", first_start)
+    date = first_start[:10] if iso else None
+    start_time = first_start[11:19] if iso else first_start[:8] if re.match(r"\d{2}:\d{2}:\d{2}", first_start) else None
+    offset = re.search(r"([+-]\d{2}):(\d{2})$", first_start) if iso else None
     task_distance = to_float(params.get("task_distance"))
-    task_key = f"at:{task}"
     utc_offset = None
     if offset:
         sign = -1 if offset.group(1).startswith("-") else 1
         utc_offset = int(offset.group(1)) + sign * int(offset.group(2)) / 60
     row = {
-        "task_key": task_key, "event_key": f"at:{event_id}", "source": "airtribune", "source_task_id": str(task),
+        "task_key": task_key, "event_key": event_key, "source": source, "source_task_id": str(source_task_id),
         "name": None, "date": date, "task_type": "race",
         "distance_km": task_distance, "ss_distance_km": to_float(params.get("ss_distance")),
-        "start_time": first_start[11:19] or None, "deadline": None,
+        "start_time": start_time or None, "deadline": None,
         "utc_offset_h": utc_offset,
         "n_present": to_int(params.get("no_of_pilots_present")), "n_launched": to_int(params.get("no_of_pilots_flying")),
         "n_ess": to_int(params.get("no_of_pilots_reaching_es")), "n_goal": to_int(params.get("no_of_pilots_reaching_goal")),
@@ -315,17 +315,21 @@ def airtribune_task(event_id, task, folder, pilots, zip_url=""):
             name = r.get("Name")
             if not isinstance(name, str) or not name.strip():
                 continue
-            reg = pilots.get(norm_name(name), {})
+            comp_id = str(to_int(r.get("Id"))) if to_int(r.get("Id")) is not None else None
+            reg = pilots.get(norm_name(name)) or pilots.get(f"#{comp_id}") or {}
             distance = to_float(r.get(c_dist)) if c_dist else None
             ess = strip_tags(r.get(c_es)) if c_es else ""
             goal = bool(ess) and task_distance is not None and distance is not None and distance >= 0.999 * task_distance
+            rank = str(r.get("#", "")).strip().upper()
+            status = "abs" if rank == "ABS" else "dnf" if rank in ("DNF", "DSQ") and not distance else None
             results.append({
-                "task_key": task_key, "comp_id": str(to_int(r.get("Id"))) if to_int(r.get("Id")) is not None else None,
+                "task_key": task_key, "comp_id": comp_id,
                 "name": name.strip(), "nat": str(r.get("Nat", "")).upper() or reg.get("nat"),
                 "sex": (r.get(sex_col) if sex_col else None) or reg.get("sex"), "civl_id": reg.get("civl_id"),
                 "glider": reg.get("glider") or (r.get("Glider") if isinstance(r.get("Glider"), str) else None),
                 "glider_cert": reg.get("glider_cert"),
-                "status": "goal" if goal else "ess" if ess else "lo" if distance else "dnf", "rank": to_int(r.get("#")),
+                "status": status or ("goal" if goal else "ess" if ess else "lo" if distance else "dnf"),
+                "rank": to_int(r.get("#")),
                 "ss_time": strip_tags(r.get("SS")) or None, "ess_time": ess or None,
                 "time_s": hms(r.get(c_time)) if c_time else None, "distance_km": distance,
                 "score": to_float(r.get("Total")), "track_file": None,
@@ -333,6 +337,16 @@ def airtribune_task(event_id, task, folder, pilots, zip_url=""):
         row["results_found"] = bool(results)
     if not results and "Rank" in page and "Glider" in page:
         _airtribune_legacy(page, row, results, pilots)
+    return row, results
+
+
+def airtribune_task(event_id, task, folder, pilots, zip_url=""):
+    page = _read(Path(folder) / f"{task}_results.html")
+    row, results = _fs_task(page, f"at:{task}", f"at:{event_id}", "airtribune", task, pilots)
+    if not row["date"]:  # from the archive's file name: igc7706_2026-06-22.zip or 08-01-2018-live.zip
+        m = re.search(r"(\d{4})-(\d{2})-(\d{2})\.zip", zip_url) or re.search(r"(\d{2})-(\d{2})-(\d{4})-live", zip_url)
+        if m:
+            row["date"] = "-".join(m.groups()) if len(m.group(1)) == 4 else f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
     return row, results
 
 
@@ -406,4 +420,58 @@ def airtribune_track_id(member):
     """Competition id of an Airtribune track from its file name
     ('Bill Hughes.20220626-191500.941.igc' -> '941')."""
     m = re.search(r"\.(\d+)\.igc$", member, re.I)
+    return m.group(1) if m else None
+
+
+# ── civlcomps.org ───────────────────────────────────────────────────────────
+
+CC_TASK_TYPES = {"race to goal": "race", "race": "race", "elapsed time": "elapsed", "elapsed": "elapsed",
+                 "open distance": "open_distance"}
+
+
+def civlcomps_pilots(participants_page):
+    """{normalised name and '#<competition number>': registration} from an event's participants page:
+    CIVL ID (the portal's profile id), nation and glider."""
+    if "jsItemWrapper" not in participants_page:
+        return {}
+    from lxml import html as lh
+
+    out = {}
+    for tr in lh.fromstring(participants_page).xpath('//tr[contains(@class, "jsItemWrapper")]'):
+        cell = {td.get("data-col"): (td.get("data-value") or td.text_content()).strip() for td in tr.xpath("./td")}
+        name = " ".join(tr.xpath('./td[@data-col="name"]')[0].text_content().split()) if cell.get("name") else None
+        if not name:
+            continue
+        reg = {"civl_id": to_int(tr.get("data-profile-id")), "nat": (cell.get("ioc") or "").upper() or None,
+               "glider": cell.get("wing_model") or None, "glider_cert": None, "sex": None}
+        out[norm_name(name)] = reg
+        if to_int(cell.get("bib")) is not None:
+            out[f"#{to_int(cell.get('bib'))}"] = reg
+    return out
+
+
+def civlcomps_task(event_id, task, folder, pilots, catalog_row):
+    page = _read(Path(folder) / f"{task}_results.html")
+    row, results = _fs_task(page, f"cc:{event_id}-{task}", f"cc:{event_id}", "civlcomps", f"{event_id}-{task}", pilots)
+    row["name"] = catalog_row.get("task_name") or row["name"]
+    row["date"] = catalog_row.get("date") or row["date"]
+    row["distance_km"] = row["distance_km"] or to_float(catalog_row.get("distance_km"))
+    row["task_type"] = CC_TASK_TYPES.get(str(catalog_row.get("task_type") or "").strip().lower(), row["task_type"])
+    return row, results
+
+
+def civlcomps_event(rows, first_task=None):
+    c = rows[0]
+    cat = str(c.get("fai_category") or "").strip()
+    return {"event_key": f"cc:{c['event_id']}", "source": "civlcomps", "source_id": str(c["event_id"]),
+            "name": c.get("title"), "discipline": "PG", "country": c.get("country") or None,
+            "place": c.get("place") or None, "lat": to_float(c.get("lat")), "lon": to_float(c.get("lon")),
+            "start_date": c.get("start_date"), "end_date": c.get("end_date"),
+            "fai_category": f"FAI {cat}" if cat in ("1", "2") else None,
+            "utc_offset_h": first_task.get("utc_offset_h") if first_task else None}
+
+
+def civlcomps_track_id(member):
+    """Competition number of a civlcomps.org track from its file name ('777.igc', 'alt_1.19.igc' -> '19')."""
+    m = re.search(r"(\d+)\.igc$", member, re.I)
     return m.group(1) if m else None
