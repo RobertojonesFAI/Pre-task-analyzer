@@ -179,6 +179,12 @@ def read_tracks(jobs, parts, workers):
     return tracks[tracks["member"].notna()].reset_index(drop=True) if "member" in tracks else tracks
 
 
+def _num(value):
+    """Competition number without leading zeros ('0040' -> '40'), or None."""
+    s = str(value or "").strip()
+    return str(int(s)) if s.isdigit() else None
+
+
 def name_from_file(member):
     """A pilot name guessed from a track's file name ('LiveTrack Koen Vancampenhoudt.947030...igc')."""
     base = Path(member).name
@@ -202,7 +208,7 @@ def match_tracks(tracks, results):
                 found, how = r, "file"
                 break
         if found is None:
-            ids = {TRACK_ID[t.source](t.member), str(getattr(t, "comp_id", "") or "").strip() or None} - {None}
+            ids = {_num(TRACK_ID[t.source](t.member)), _num(getattr(t, "comp_id", None))} - {None}
             found = next((r for r in rows if r.comp_id in ids), None)
             how = "comp_id" if found is not None else None
         if found is None and rows:
@@ -268,6 +274,11 @@ def main():
 
     turnpoints = pd.DataFrame([{"task_key": t["task_key"], **tp} for t in tasks for tp in t["turnpoints"]])
     tasks = pd.DataFrame(tasks)
+    # Tasks whose results page gave no date (no page, or none in it): the date most of their tracks carry
+    if "date" in tracks:
+        track_date = tracks.dropna(subset=["date"]).groupby("task_key")["date"].agg(lambda s: s.mode().iloc[0])
+        tasks["date_from_tracks"] = tasks["date"].isna() & tasks["task_key"].isin(track_date.index)
+        tasks["date"] = tasks["date"].fillna(tasks["task_key"].map(track_date))
     tasks["turnpoints"] = tasks["turnpoints"].map(json.dumps)
     counts = tracks[tracks["duplicate_of"].isna()].groupby("task_key").size()
     tasks["n_tracks"] = tasks["task_key"].map(counts).fillna(0).astype(int)

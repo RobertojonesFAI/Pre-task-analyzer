@@ -34,14 +34,15 @@ One row per task with a track package.
 |---|---|
 | `task_key`, `event_key` | task and its competition |
 | `source_task_id`, `name`, `date` | id on the scoring site, task name, flying date |
+| `date_from_tracks` | the date was taken from the tracks' IGC headers because the results gave none |
 | `task_type` | `race`, `elapsed` or `open_distance` |
 | `distance_km`, `ss_distance_km` | optimised task distance and start-to-ESS distance |
 | `start_time`, `deadline`, `utc_offset_h` | first start gate and task deadline (local) |
 | `n_present`, `n_launched`, `n_ess`, `n_goal`, `n_landed_out` | pilot counts from the official results |
 | `day_quality` | GAP day quality (0–1) |
 | `stopped`, `training` | stopped task, training day |
-| `turnpoints` | the route as JSON (same content as the `turnpoints` table) |
-| `results_found` | whether the official results page could be read |
+| `turnpoints` | the route as JSON (same content as the `turnpoints` table); some older Airtribune reports give turnpoint names and radii but no coordinates |
+| `results_found` | whether official results could be read. Many Airtribune events of 2015–2020 published track archives but no per-task results |
 | `track_kind` | Airtribune only: `archive` (scored IGC package) or `live_archive` (live-tracking archive) |
 | `n_tracks` | unique tracks of the task |
 

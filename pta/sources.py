@@ -325,7 +325,75 @@ def airtribune_task(event_id, task, folder, pilots, zip_url=""):
                 "score": to_float(r.get("Total")), "track_file": None,
             })
         row["results_found"] = bool(results)
+    if not results and "Rank" in page and "Glider" in page:
+        _airtribune_legacy(page, row, results, pilots)
     return row, results
+
+
+MONTHS = {m: i for i, m in enumerate(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
+
+
+def _airtribune_legacy(page, row, results, pilots):
+    """Results uploaded to Airtribune as a scoring program's HTML report: one outer table holding the
+    route (names and radii, no coordinates), a statistics block and the results, where pilots who did
+    not reach ESS have fewer cells. Fills row and results in place."""
+    from lxml import html as lh
+
+    doc = lh.fromstring(page)
+    text = " ".join(doc.text_content().split())
+    count = lambda label: to_int((re.search(label + r"\s*(\d+)", text) or [None, None])[1])  # noqa: E731
+    row.update(n_present=count("Total Pilots:"), n_landed_out=count("Pilots Landed Out:"),
+               n_ess=count("Pilots at ES:"), n_goal=count("Pilots in Goal:"))
+    if row["n_present"] is not None:
+        row["n_launched"] = row["n_launched"] or row["n_present"]
+    m = re.search(r"\b(\d{2})-(" + "|".join(MONTHS) + r")-(\d{2})\b", text)
+    if m and not row["date"]:
+        row["date"] = f"20{m.group(3)}-{MONTHS[m.group(2)]:02d}-{m.group(1)}"
+    title = doc.findtext(".//title") or ""
+    m = re.search(r"-\s*([\d.]+)\s*km\s*-", title)
+    if m and not row["distance_km"]:
+        row["distance_km"] = float(m.group(1))
+    m = re.match(r"\s*(.+?)\s*-\s*[\d.]+\s*km", title)
+    row["name"] = row["name"] or (m.group(1) if m else None)
+
+    rows = [[c.text_content().strip() for c in tr if c.tag in ("td", "th")] for tr in doc.iter("tr")]
+    route = next((i for i, r in enumerate(rows) if r[:3] == ["Order", "Check", "Radius"]), None)
+    if route is not None and not row["turnpoints"]:
+        for r in rows[route + 1:]:
+            if len(r) < 7:
+                break
+            kind = {"TO": "TAKEOFF", "GOAL": "GOAL"}.get(r[0], "SSS" if r[3] == "SS" else "ESS" if r[3] == "ES" else "")
+            row["turnpoints"].append({"seq": len(row["turnpoints"]), "name": r[5], "type": kind, "lat": None,
+                                      "lon": None, "radius_m": (to_float(r[2]) or 0) * 1000 if "km" in r[2] else to_float(r[2]),
+                                      "alt_m": None})
+    head = next((i for i, r in enumerate(rows) if "Rank" in r and "Glider" in r and "Name" in r), None)
+    if head is None:
+        return
+    header = rows[head]
+    idx = {name: header.index(name) for name in header if name}
+    from_end = lambda name: len(header) - idx[name] if name in idx else None  # noqa: E731
+    k_dist, k_score = from_end("Distance"), from_end("Score")
+    for r in rows[head + 1:]:
+        if len(r) < 8 or not r[0].isdigit():
+            if results:
+                break
+            continue
+        full = len(r) == len(header)
+        finish = r[idx["Finish"]] if full and "Finish" in idx else ""
+        distance = to_float(r[-k_dist]) if k_dist else None
+        name = r[idx.get("Name", 2)]
+        reg = pilots.get(norm_name(name), {})
+        glider = r[idx.get("Glider", 4)].split("/")[0].strip() or None
+        start = r[idx["Start"]] if "Start" in idx and len(r) > idx["Start"] and hms(r[idx["Start"]]) else None
+        results.append({
+            "task_key": row["task_key"], "comp_id": str(int(r[idx.get("ID", 1)])) if r[idx.get("ID", 1)].isdigit() else None,
+            "name": name, "nat": r[idx.get("Nation", 3)].upper() or reg.get("nat"), "sex": reg.get("sex"),
+            "civl_id": reg.get("civl_id"), "glider": reg.get("glider") or glider, "glider_cert": reg.get("glider_cert"),
+            "status": "goal" if hms(finish) else "lo" if distance else "dnf", "rank": int(r[0]),
+            "ss_time": start, "ess_time": finish or None, "time_s": hms(r[idx["Time"]]) if full and "Time" in idx else None,
+            "distance_km": distance, "score": to_float(r[-k_score]) if k_score else None, "track_file": None,
+        })
+    row["results_found"] = bool(results)
 
 
 def airtribune_track_id(member):
