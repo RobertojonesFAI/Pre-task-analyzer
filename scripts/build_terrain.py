@@ -3,9 +3,12 @@
 
 Downloads the 1° DEM tiles the sites need (about 25-40 MB each, from the AWS Open Data mirror,
 no account) to DEM_DIR, then computes the features of each chip's 625 cells (pta/terrain.py) and
-writes DB/cells.parquet. Tiles and chips are cached, so a second run only does what is missing.
+writes DB/cells.parquet. With --local the tiles are copied to a local disk first and read from
+there. Finished chips are saved in batches (DB/_terrain_parts), so a second run only does what is
+missing.
 
-    python3 scripts/build_terrain.py /content/drive/MyDrive/IGCS/database --dem /content/drive/MyDrive/IGCS/dem/glo30
+    python3 scripts/build_terrain.py /content/drive/MyDrive/IGCS/database --dem /content/drive/MyDrive/IGCS/dem/glo30 \
+        --local /content/dem_glo30
 """
 
 import argparse
@@ -48,22 +51,37 @@ def download(tile, folder, missing):
     return tile, error
 
 
-def process(chips, dem_dir, parts):
-    """Features of a run of neighbouring chips (one process keeps their tiles in memory)."""
+def process(chips, dem_dir):
+    """Features of a run of neighbouring chips (one process keeps their tiles in memory).
+    Returns (chips, cells) for the main process to write: chips all at sea give no cells."""
     dem = terrain.DEM(dem_dir)
-    done = 0
+    frames = []
     for chip in chips:
         out = terrain.chip_cells(chip, dem)
-        df = pd.DataFrame(out) if out else pd.DataFrame({"cell_id": pd.Series(dtype="int64")})
-        if len(df):
+        if out:
+            df = pd.DataFrame(out)
+            lat, lon = grid.cell_centre(df["cell_id"].to_numpy())
             df.insert(1, "chip_id", chip)
-            df.insert(2, "lat", grid.cell_centre(df["cell_id"].to_numpy())[0])
-            df.insert(3, "lon", grid.cell_centre(df["cell_id"].to_numpy())[1])
-        tmp = parts / f"{chip}.tmp"
-        df.to_parquet(tmp, index=False)
-        tmp.rename(parts / f"{chip}.parquet")
-        done += 1
-    return done
+            df.insert(2, "lat", lat)
+            df.insert(3, "lon", lon)
+            frames.append(df)
+    return chips, (pd.concat(frames, ignore_index=True) if frames else None)
+
+
+def write_batch(parts, frames, chips):
+    """One part file for many chips (a Drive mount copes badly with thousands of small files), then
+    the chips it holds are added to done_chips.txt. A lost connection stops the run cleanly."""
+    try:
+        name = f"batch_{int(time.time() * 1000)}"
+        if frames:
+            tmp = parts / f"{name}.tmp"
+            pd.concat(frames, ignore_index=True).to_parquet(tmp, index=False)
+            tmp.rename(parts / f"{name}.parquet")
+        with open(parts / "done_chips.txt", "a") as f:
+            f.write("".join(f"{c}\n" for c in chips))
+    except OSError as e:
+        sys.exit(f"\nCould not write to {parts} ({e}).\nIf Google Drive disconnected, run the Drive cell "
+                 "again (it remounts Drive) and then this cell: finished chips are kept.")
 
 
 def main():
@@ -73,6 +91,8 @@ def main():
     parser.add_argument("--workers", type=int, default=2, help="processes computing features (default 2)")
     parser.add_argument("--downloads", type=int, default=8, help="tiles downloaded at once (default 8)")
     parser.add_argument("--redo", action="store_true", help="recompute every chip (tiles are kept)")
+    parser.add_argument("--local", type=Path, help="local folder to copy the tiles to before computing "
+                        "(much faster and gentler than reading them from a Drive mount)")
     args = parser.parse_args()
     args.dem.mkdir(parents=True, exist_ok=True)
     parts = args.db / "_terrain_parts"
@@ -105,22 +125,49 @@ def main():
 
     failed = {t for t in tiles if not (args.dem / f"{terrain.tile_name(*t)}.tif").exists()
               and terrain.tile_name(*t) not in missing}
-    have = [c for c in chips if (parts / f"{c}.parquet").exists()]
-    waiting = [c for c in chips if c not in set(have) and failed & set(terrain.tiles_for_box(*terrain.chip_window(c)))]
-    todo = [c for c in chips if c not in set(have) and c not in set(waiting)]
-    print(f"\nCells: {len(have):,} chips done before, {len(todo):,} to compute"
+    done_file = parts / "done_chips.txt"
+    have = set(int(x) for x in done_file.read_text().split()) if done_file.exists() else set()
+    have |= {int(p.stem) for p in parts.glob("*.parquet") if p.stem.isdigit()}  # one file per chip (older runs)
+    waiting = [c for c in chips if c not in have and failed & set(terrain.tiles_for_box(*terrain.chip_window(c)))]
+    todo = [c for c in chips if c not in have and c not in set(waiting)]
+    print(f"\nCells: {len(chips) - len(todo) - len(waiting):,} chips done before, {len(todo):,} to compute"
           + (f", {len(waiting):,} waiting for tiles that failed" if waiting else ""), flush=True)
+
+    dem_dir = args.dem
+    if args.local and todo:
+        args.local.mkdir(parents=True, exist_ok=True)
+        need = sorted({t for c in todo for t in terrain.tiles_for_box(*terrain.chip_window(c))})
+        copied = 0
+        for t in need:
+            src = args.dem / f"{terrain.tile_name(*t)}.tif"
+            dst = args.local / src.name
+            if src.exists() and (not dst.exists() or dst.stat().st_size != src.stat().st_size):
+                shutil.copyfile(src, dst)
+                copied += 1
+        print(f"Copied {copied} tiles to {args.local} ({len(need)} needed)", flush=True)
+        dem_dir = args.local
+
     runs = [todo[i:i + 20] for i in range(0, len(todo), 20)]  # neighbouring chips share tiles
-    started, done = time.time(), 0
+    started, done, frames, batch = time.time(), 0, [], []
     with ProcessPoolExecutor(args.workers) as pool:
-        futures = [pool.submit(process, r, args.dem, parts) for r in runs]
+        futures = [pool.submit(process, r, dem_dir) for r in runs]
         for n, f in enumerate(as_completed(futures), 1):
-            done += f.result()
+            run_chips, cells = f.result()
+            batch += run_chips
+            if cells is not None:
+                frames.append(cells)
+            done += len(run_chips)
+            if len(batch) >= 300 or n == len(runs):
+                write_batch(parts, frames, batch)
+                frames, batch = [], []
             if n % 10 == 0 or n == len(runs):
                 print(f"... {done:,}/{len(todo):,} chips, {(time.time() - started) / 60:.0f} min", flush=True)
 
-    frames = [pd.read_parquet(parts / f"{c}.parquet") for c in chips if (parts / f"{c}.parquet").exists()]
-    cells = pd.concat([f for f in frames if len(f)], ignore_index=True)
+    files = sorted(parts.glob("batch_*.parquet")) + [p for p in parts.glob("*.parquet") if p.stem.isdigit()]
+    with ThreadPoolExecutor(16) as pool:
+        frames = [f for f in pool.map(pd.read_parquet, files) if len(f)]
+    cells = pd.concat(frames, ignore_index=True).drop_duplicates("cell_id", keep="last")
+    cells = cells[cells["chip_id"].isin(chips)]
     cells.to_parquet(args.db / "cells.parquet", index=False)
     print(f"\ncells.parquet: {len(cells):,} cells in {cells['chip_id'].nunique():,} chips "
           f"({len(chips) - cells['chip_id'].nunique():,} chips all sea or still missing)")
