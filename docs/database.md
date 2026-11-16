@@ -8,7 +8,7 @@ db = duckdb.connect()
 db.sql("SELECT * FROM read_parquet('database/tasks.parquet') LIMIT 5").df()
 ```
 
-Keys are prefixed by source: `fm:` Flymaster, `as:` AirScore, `at:` Airtribune. Times published by the scoring sites (`start_time`, `ss_time`, `ess_time`, `deadline`) are local `HH:MM:SS`; `utc_offset_h` converts them to UTC when it is known. IGC fix times are UTC.
+Keys are prefixed by source: `fm:` Flymaster, `as:` AirScore, `at:` Airtribune, `cc:` civlcomps.org (CIVL's event portal; task keys `cc:<event>-<n>`). Times published by the scoring sites (`start_time`, `ss_time`, `ess_time`, `deadline`) are local `HH:MM:SS`; `utc_offset_h` converts them to UTC when it is known. IGC fix times are UTC.
 
 The tables hold pilot names because they are needed to link tracks, results and ratings. They stay in the private Drive folder; anything published from them uses codes and aggregates only.
 
@@ -63,7 +63,7 @@ One row per pilot in a task's official results.
 | `result_id`, `task_key` | result and its task |
 | `comp_id` | pilot's number in the competition |
 | `name`, `name_norm`, `nat`, `sex` | pilot as published, normalised name, IOC nation, sex |
-| `civl_id` | CIVL ID when published (Flymaster, AirScore, Airtribune registrations) |
+| `civl_id` | CIVL ID when published (Flymaster, AirScore, Airtribune and civlcomps.org registrations) |
 | `pilot_key` | `civl:<id>`, or `name:<normalised name>:<nation>` when there is no CIVL ID |
 | `glider`, `glider_cert` | declared glider and its class (`EN-A`…`EN-D`, `CCC`) when published |
 | `status` | `goal`, `ess`, `lo` (landed out), `dnf`, `abs`, `dsq` |
