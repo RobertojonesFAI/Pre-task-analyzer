@@ -30,7 +30,7 @@ Data: competition IGC tracks (Flymaster, AirScore and Airtribune), task definiti
 notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
 pta/         shared code: IGC reader, results parsers and flight analysis
-docs/        design notes (model_design.md: the general model; database.md: the tables)
+docs/        design notes (model_design.md: the general model; database.md: the tables; deployment.md: how it will be served)
 data/        small tables only (catalogs); tracks live in Google Drive
 ```
 
