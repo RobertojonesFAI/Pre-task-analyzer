@@ -27,7 +27,7 @@ import sys
 import time
 import zipfile
 from collections import Counter, defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -140,6 +140,11 @@ def collect_tasks(root):
 
 # ── Tracks ──────────────────────────────────────────────────────────────────
 
+def is_mac_junk(member):
+    """Metadata files a Mac adds to zips it creates (__MACOSX/._name.igc): not tracks."""
+    return "__MACOSX/" in member or member.rsplit("/", 1)[-1].startswith("._")
+
+
 def read_zip(job):
     """Track rows (header fields and fix summary) for every IGC file in one task package."""
     source, task_key, path = job
@@ -147,7 +152,7 @@ def read_zip(job):
     try:
         with zipfile.ZipFile(path) as z:
             for member in z.namelist():
-                if not member.lower().endswith(".igc"):
+                if not member.lower().endswith(".igc") or is_mac_junk(member):
                     continue
                 try:
                     info = igc.summary(z.read(member))
@@ -174,9 +179,14 @@ def read_tracks(jobs, parts, workers):
                 part(job), index=False)
             if n % 50 == 0 or n == len(todo):
                 print(f"... {n}/{len(todo)} packages, {(time.time() - started) / 60:.0f} min", flush=True)
-    frames = [f for f in (pd.read_parquet(part(j)) for j in jobs if part(j).exists()) if len(f.columns) > 3]
+    with ThreadPoolExecutor(16) as pool:  # many small files: much faster in parallel on a Drive mount
+        frames = list(pool.map(lambda j: pd.read_parquet(part(j)), [j for j in jobs if part(j).exists()]))
+    frames = [f for f in frames if len(f.columns) > 3]
     tracks = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    return tracks[tracks["member"].notna()].reset_index(drop=True) if "member" in tracks else tracks
+    if "member" not in tracks:
+        return tracks
+    tracks = tracks[tracks["member"].notna()]
+    return tracks[~tracks["member"].map(is_mac_junk)].reset_index(drop=True)
 
 
 def _num(value):

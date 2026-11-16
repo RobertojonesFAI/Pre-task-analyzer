@@ -167,8 +167,13 @@ def main():
     print("\nCollecting the tables from the task parts", flush=True)
     keys = [j[0] for j in jobs if (parts / f"{safe(j[0])}.done").exists()]
     links = unique[["track_id", "result_id", "pilot_key", "source"]]
-    flights = gather(parts, "flights", keys).merge(links, on="track_id", how="left")
+    # inner join: tracks dropped from the catalog since a task was analysed are left out
+    flights = gather(parts, "flights", keys).merge(links, on="track_id", how="inner")
     climbs, glides = gather(parts, "climbs", keys), gather(parts, "glides", keys)
+    if len(climbs):
+        climbs = climbs[climbs["track_id"].isin(links["track_id"])]
+    if len(glides):
+        glides = glides[glides["track_id"].isin(links["track_id"])]
     for name, df in [("flights", flights), ("climbs", climbs), ("glides", glides)]:
         df.to_parquet(args.db / f"{name}.parquet", index=False)
         print(f"  wrote {name}.parquet", flush=True)
