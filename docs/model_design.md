@@ -68,6 +68,10 @@ No latitude, longitude or site name as features. Everything is a physical or rel
 - **Calibration**: when the model says 30%, about 30% of those pilots should land out.
 - **Balance**: examples are weighted by site so sites with many tracks do not dominate.
 
+### Forecast, not reanalysis, at prediction time
+
+Training uses ERA5, the best estimate of what the weather actually was. On a task day the model gets a forecast, which carries its own errors, so a model calibrated on ERA5 would be overconfident. Before the goal shares are shown to a committee they are checked, and recalibrated if needed, on past competition days run with the forecast that was available that morning (archived HRRR in the US, ECMWF open data elsewhere).
+
 ## 5. Where it can be trusted
 
 Terrain, land cover and weather inputs are global, so the model runs anywhere. It is reliable where conditions resemble its training data. Each cell gets a distance to the training data in feature space, and cells far from anything seen are shown as **low confidence** instead of a made-up number.

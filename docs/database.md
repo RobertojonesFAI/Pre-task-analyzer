@@ -1,6 +1,6 @@
 # Competition database
 
-Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, and by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks. They can be read with pandas or queried with SQL through DuckDB, with no database server:
+Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, and by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model. They can be read with pandas or queried with SQL through DuckDB, with no database server:
 
 ```python
 import duckdb
@@ -140,3 +140,45 @@ One row per stretch between climbs (including takeoff to the first climb and the
 ## fixes
 
 `fixes/<task_key with : as _>.parquet`: the fixes of every flight of a task, every 5 s from takeoff to landing, after cleaning. Columns `track_id`, `t` (seconds UTC), `lat`, `lon`, `alt` (m), `vz` (m/s, over 20 s) and `circling`. These are the input for the cell crossings and landout labels of the next steps.
+
+## The grid
+
+Every spatial table uses the same global grid (`pta/grid.py`). A **chip** is the 0.25° box around one ERA5 grid point (centre at multiples of 0.25°), so a chip's weather is one ERA5 value. Each chip holds 25 x 25 **cells** of 0.01° (1.1 km north-south; 0.79 km east-west at 45°). Ids are computed from a latitude and longitude, with no lookup:
+
+```python
+from pta import grid
+grid.cell_id(lat, lon)     # row * 36000 + col, rows from 90.125° S, columns from 180.125° W
+grid.chip_id(lat, lon)     # row * 1440 + col
+grid.chip_of_cell(cell_id)
+```
+
+## sites
+
+Competitions grouped by where they were flown. A competition's area is the box around its turnpoints (cylinders up to 10 km) and the 1st-99th percentiles of its climbs, takeoffs and landings, plus about 5 km; competitions whose areas overlap by at least half of the smaller one are one site.
+
+| Column | Meaning |
+|---|---|
+| `site_id` | `s` + the chip id at the site's centre |
+| `name`, `country` | most common place name of its competitions (or the latest competition's name) |
+| `lat`, `lon`, `south`, `north`, `west`, `east` | centre and box |
+| `n_events`, `n_flights`, `n_chips` | competitions, analysed flights, chips covered |
+| `first_date`, `last_date`, `events` | first and last competition, and their names |
+
+`event_sites` links each competition (`event_key`) to its `site_id`; competitions without coordinates are left out. `site_chips` lists every chip of each site with its ERA5 point (`era5_lat`, `era5_lon`); a chip can belong to two neighbouring sites.
+
+## cells
+
+Terrain of every 1 km cell of the site chips, from the Copernicus GLO-30 DEM (30 m; tiles kept in `dem/glo30/` in the project folder). Each cell summarises its 36 x 36 DEM pixels (`pta/terrain.py`).
+
+| Column | Meaning |
+|---|---|
+| `cell_id`, `chip_id`, `lat`, `lon` | cell, its chip and its centre |
+| `elev_mean`, `elev_min`, `elev_max`, `elev_std` | elevation (m above sea level) |
+| `slope_mean`, `slope_p90`, `steep_share` | slope in degrees, and the share of the cell steeper than 25° |
+| `facing_east`, `facing_north` | mean horizontal part of the ground's normal: which way the cell faces overall (−0.34 north = a south-facing 20° slope) |
+| `curvature` | mean Laplacian of the (smoothed) surface: positive in valleys and bowls, negative on ridges |
+| `ridge_share`, `valley_share` | share of pixels more than 15 m above or below their surroundings within about 300 m |
+| `tpi_5km`, `tpi_20km` | the cell's mean elevation minus the mean of the cells within about 5 km and 20 km: positive on ridges and peaks, negative in valleys |
+| `relief_5km` | highest minus lowest point within about 5 km |
+| `flat_share`, `sun_<aspect>_<class>` | share of the cell that is flat (under 5°), and the share facing each of 8 directions (`n`, `ne`, …, `nw`) in each slope class (1: 5–15°, 2: 15–30°, 3: over 30°). `pta.terrain.sun_on_cell` turns these into direct sunlight on the ground for any sun position (`pta.terrain.sun_position`) |
+| `nodata_share` | share of the cell with no DEM tile (open sea), set to sea level |
