@@ -47,3 +47,15 @@ data/        small tables only (catalogs); tracks live in Google Drive
 | 6 | `notebooks/06_sites_terrain.ipynb` | Groups the competitions into flying sites (`scripts/build_sites.py`), downloads the Copernicus GLO-30 DEM around them and describes the terrain of every 1 km cell (`scripts/build_terrain.py`, `pta/terrain.py`, `pta/grid.py`) | `database/sites`, `event_sites`, `site_chips`, `cells`; `dem/glo30/` tiles |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
+
+## Next steps
+
+In order of priority for the end of the semester (December 2026):
+
+1. **Weather base (07):** ERA5 and ERA5-Land for every site, hourly, on the days of each competition (Copernicus Climate Data Store).
+2. **Energy on the slopes:** sunlight on each cell's slopes with shading by neighbouring mountains, clouds, albedo and land cover, and the trigger point of each thermal traced back upwind.
+3. **Validation against the pilots:** weather sources compared with the ceilings of the real thermals, and with radiosonde soundings (IGRA2).
+4. **HRRR** as a regional layer for the United States.
+5. **CERRA** as a regional layer for Europe.
+
+Then the cell crossings and labels, the general thermal and landout model, the task model and the route planner (see [docs/model_design.md](docs/model_design.md)).
