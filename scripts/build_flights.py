@@ -124,7 +124,7 @@ def _track_distance(a, b):
     return float(np.median(d)), (t1 - t0) / shorter
 
 
-def mark_same_flights(flights, tasks, fixes_dir, threads=16):
+def mark_same_flights(flights, tasks, fixes_dir, track_dates=None, threads=16):
     """Copies of one flight in different files: the same competition published by two sources (a
     live-tracker file on one, the pilot's instrument on the other) or a pilot's second instrument.
     Their fixes differ, so the catalog's hash does not catch them. Candidates take off and land
@@ -135,23 +135,28 @@ def mark_same_flights(flights, tasks, fixes_dir, threads=16):
     who did not fly and whose trackers recorded the drive down from launch in one car; the terrain
     step checks their height above the ground."""
     f = flights[flights["error"].isna()].copy() if "error" in flights else flights.copy()
-    f["day"] = pd.to_datetime(f["task_key"].map(tasks.set_index("task_key")["date"]), errors="coerce")
+    task_day = pd.to_datetime(f["task_key"].map(tasks.set_index("task_key")["date"]), errors="coerce")
+    igc_day = pd.to_datetime(f["track_id"].map(track_dates), errors="coerce") if track_dates is not None else task_day
+    f["day"] = igc_day.fillna(task_day)  # fix times count from the IGC file's date
     f = f.dropna(subset=["day", "t_takeoff", "t_landing"])
-    f["start"] = f["t_takeoff"] % 86400
+    # absolute takeoff time, so only flights of the same day and minutes are compared
+    f["start"] = (f["day"] - pd.Timestamp("1970-01-01")).dt.total_seconds() + f["t_takeoff"]
     f = f.sort_values("start").reset_index(drop=True)
-    start, day = f["start"].to_numpy(), f["day"].to_numpy()
+    start = f["start"].to_numpy()
+    end = start + (f["t_landing"] - f["t_takeoff"]).to_numpy()
     lat0, lon0, lat1, lon1 = (f[c].to_numpy() for c in ("lat_takeoff", "lon_takeoff", "lat_landing", "lon_landing"))
-    end = f["t_landing"].to_numpy() - f["t_takeoff"].to_numpy() + start
-    pairs = []
-    for i in range(len(f)):
-        j = i + 1
-        while j < len(f) and start[j] - start[i] <= SAME_START_S:
-            if (abs((day[j] - day[i]) / np.timedelta64(1, "D")) <= 1
-                    and abs(end[j] - end[i]) <= SAME_END_S
-                    and flight._dist(lat0[i], lon0[i], lat0[j], lon0[j]) <= SAME_START_M
-                    and flight._dist(lat1[i], lon1[i], lat1[j], lon1[j]) <= SAME_END_M):
-                pairs.append((i, j))
-            j += 1
+    pairs, k = [], 1
+    while k < len(f):  # sorted by takeoff: compare each flight with the k-th next one, vectorised
+        close = start[k:] - start[:-k] <= SAME_START_S
+        if not close.any():
+            break
+        i = np.flatnonzero(close)
+        j = i + k
+        ok = ((np.abs(end[j] - end[i]) <= SAME_END_S)
+              & (flight._dist(lat0[i], lon0[i], lat0[j], lon0[j]) <= SAME_START_M)
+              & (flight._dist(lat1[i], lon1[i], lat1[j], lon1[j]) <= SAME_END_M))
+        pairs += list(zip(i[ok].tolist(), j[ok].tolist()))
+        k += 1
     if not pairs:
         return {}, set()
 
@@ -295,7 +300,8 @@ def main():
     if len(glides):
         glides = glides[glides["track_id"].isin(links["track_id"])]
     started = time.time()
-    same, shared = mark_same_flights(flights, pd.read_parquet(args.db / "tasks.parquet"), fixes_dir)
+    same, shared = mark_same_flights(flights, pd.read_parquet(args.db / "tasks.parquet"), fixes_dir,
+                                     track_dates=unique.set_index("track_id")["date"] if "date" in unique else None)
     flights["same_flight_as"] = flights["track_id"].map(same)
     flights["shared_path"] = flights["track_id"].isin(shared)
     print(f"  same flight in two files: {len(same):,} copies marked; {len(shared):,} tracks share one path "
