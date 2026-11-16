@@ -16,6 +16,10 @@ Asking what happened to each pilot who crossed, instead of whether anyone climbe
 
 The landout label is conditional on arrival height: the model predicts P(land out | arriving at this cell at h metres above ground). Crossing at 2,000 m and at 200 m are different questions, and the task model uses the heights pilots are expected to reach each leg at.
 
+### Where a thermal starts
+
+The wind carries a thermal downwind as it rises, so where a pilot circles is not where the thermal left the ground. Each climb is traced back upwind (wind between the ground and the climb's height, over the time the air took to rise) to estimate its trigger point, and the terrain and energy features of that point are used alongside those of the cell where the pilot climbed.
+
 ### Labels from a track
 
 - **Climb**: circling with at least 0.5 m/s mean climb for 30 s or more; rate, base and top are recorded.
@@ -40,6 +44,14 @@ No latitude, longitude or site name as features. Everything is a physical or rel
 - boundary-layer height (BLH), CAPE, CIN, lapse rates, surface sensible heat flux
 - cloud cover, cloud base (LCL), humidity, precipitation
 - wind at several heights and its shear
+
+**Energy reaching the ground** (the sun-on-slope model of `pta/terrain.py`, extended)
+- direct sunlight on each cell's slopes for the sun's position at that hour (its share of slopes and aspects is stored per cell), shaded by neighbouring mountains (horizon computed from the DEM)
+- times the surface solar radiation ERA5 says actually arrived (clouds) and (1 − albedo) (MODIS 500 m, ERA5-Land), accumulated since sunrise: an energy index per cell and hour
+- land cover (ESA WorldCover 10 m) and snow cover, which decide how much of that energy heats the air
+
+**The day as it develops**
+- weather at every hour of the task window, not a daily summary: boundary-layer growth, CAPE and CIN, mid-level humidity and cloud building through the afternoon (overdevelopment), temperatures on pressure levels (inversions that do not break), and the wind at several heights and its timing against each leg of the route
 
 **Derived features**
 - **Usable height = (terrain elevation + BLH) − cell elevation**: the real working height. High terrain under a low boundary layer leaves little usable height, and the model learns the landout risk from it directly.
@@ -67,7 +79,9 @@ Where a high-resolution archive exists, a second, regional model is trained on t
 | Australia, New Zealand | BARRA2 | 12 km and 4.4 km | 1979 to present (NCI, CC BY 4.0) |
 | India | IMDAA | 12 km, hourly | 1979–2018 only |
 
-A regional model is kept only where it beats the base on held-out sites and days.
+A regional model is kept only where it beats the base on held-out sites and days. Mexico and Colombia have no public regional archive (the national WRF runs publish images only), so the base serves there; in Europe, COSMO-REA6 (6 km) could be a second regional source if its period covers enough competitions.
+
+**Soundings.** The radiosonde archive (NOAA IGRA2, global, including stations in Mexico and Colombia) has two soundings a day at few stations, too sparse as an input, but it measures the bias of each weather source in lapse rates and inversions by region, and corrects it.
 
 **Checking weather sources against the pilots.** The climbs table holds the real top of every thermal (about 1.9 million thermals before the civlcomps.org tracks). Comparing each source's boundary-layer height with the ceilings pilots actually reached, by site and time of day, measures directly which source describes soaring conditions best, before any model is trained.
 
@@ -84,6 +98,10 @@ A regional model is kept only where it beats the base on held-out sites and days
 - **Baselines**: a season-and-hour climatology per cell (thermal.kk7.ch style) and a terrain-plus-time model.
 - **Calibration**: when the model says 30%, about 30% of those pilots should land out.
 - **Balance**: examples are weighted by site so sites with many tracks do not dominate.
+
+### Days that change
+
+Overdevelopment, inversions that do not break and wind that arrives mid-task make the worst errors. The hourly weather features above let the model see most of them coming, and stopped tasks (`tasks.stopped`) are a label of their own: the tool also gives the chance that a task will be stopped. What a forecast cannot say for sure (when the day will overdevelop) comes from forecast ensembles (ECMWF ENS, GEFS): when their members disagree, the predicted ranges widen, and the committee sees forecast uncertainty separately from the model's own.
 
 ### Forecast, not reanalysis, at prediction time
 
