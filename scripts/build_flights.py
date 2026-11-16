@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pta import flight, igc  # noqa: E402
 
 TABLES = ("flights", "climbs", "glides")
+NOT_ERRORS = ("no flight found", "no valid fixes")  # what the track holds, not a failure to retry
 
 
 def safe(task_key):
@@ -113,7 +114,7 @@ def main():
     parser.add_argument("--workers", type=int, default=2, help="processes analysing tracks (default 2)")
     parser.add_argument("--redo", action="store_true", help="discard the cache and analyse every track again")
     parser.add_argument("--retry-errors", action="store_true",
-                        help="analyse again the tasks with tracks that failed with an error (not those with no flight)")
+                        help="analyse again the tasks with tracks that failed with an error (not tracks with no flight or no fixes)")
     parser.add_argument("--root", type=Path, help="folder holding flymaster_igc, airscore_igc and airtribune_igc, "
                         "if it is not where it was when the catalog was built")
     parser.add_argument("--limit", type=int, help="analyse only this many tasks (for a test)")
@@ -139,7 +140,7 @@ def main():
             if not path.exists():
                 return False
             err = pd.read_parquet(path).get("error")
-            return err is not None and bool((err.notna() & (err != "no flight found")).any())
+            return err is not None and bool((err.notna() & ~err.isin(NOT_ERRORS)).any())
 
         with ThreadPoolExecutor(16) as pool:
             retry = [j for j, bad in zip(jobs, pool.map(failed, jobs)) if bad]
