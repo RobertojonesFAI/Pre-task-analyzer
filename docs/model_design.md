@@ -54,6 +54,23 @@ No latitude, longitude or site name as features. Everything is a physical or rel
 - arrival height above ground, glider class, results-based rating and track-based profile (only flights before the task)
 - distance from launch, time since the start, share of the field still flying
 
+### Weather sources: a global base and regional layers
+
+The general model is trained on one weather source everywhere, so it learns physics rather than which model a region uses: **ERA5** (0.25°, hourly, 1940 to present: boundary-layer height, CAPE, CIN, heat fluxes, cloud, winds and temperatures on pressure levels) plus **ERA5-Land** (0.1°, hourly: surface heat fluxes and soil moisture). Many competition sites (Colombia, Brazil, Mexico, Turkey, Kazakhstan, Korea, Nepal) have no regional model with a public archive, so only a global base works everywhere.
+
+Where a high-resolution archive exists, a second, regional model is trained on top of the base and compared with it, the way a task committee learns which forecast model works best at its site:
+
+| Region | Source | Resolution | Archive |
+|---|---|---|---|
+| United States | HRRR | 3 km, hourly | 2014 to present (AWS) |
+| Europe | CERRA (Copernicus regional reanalysis) | 5.5 km, 3-hourly analyses with hourly short forecasts | 1984 to present, updated monthly |
+| Australia, New Zealand | BARRA2 | 12 km and 4.4 km | 1979 to present (NCI, CC BY 4.0) |
+| India | IMDAA | 12 km, hourly | 1979–2018 only |
+
+A regional model is kept only where it beats the base on held-out sites and days.
+
+**Checking weather sources against the pilots.** The climbs table holds the real top of every thermal (about 1.9 million thermals before the civlcomps.org tracks). Comparing each source's boundary-layer height with the ceilings pilots actually reached, by site and time of day, measures directly which source describes soaring conditions best, before any model is trained.
+
 ## 3. Models
 
 - **Main**: gradient-boosted trees (LightGBM or XGBoost). They handle hundreds of features, interactions such as "low usable height × lee side", and missing values. SHAP values explain each prediction ("this cell is risky mainly because of low usable height and lee-side wind"), which is what the Meet Director sees.
