@@ -63,7 +63,11 @@ def analyse_task(job):
             flights.append({**row, "error": error})
             continue
         try:
-            f, c, g, k = flight.analyse(igc.fixes(z.read(member)))
+            fx = igc.fixes(z.read(member))
+            if len(fx["t"]) == 0:
+                flights.append({**row, "error": "no valid fixes"})
+                continue
+            f, c, g, k = flight.analyse(fx)
         except Exception as e:  # a damaged file must not stop the run
             flights.append({**row, "error": f"{type(e).__name__}: {str(e)[:150]}"})
             continue
@@ -93,7 +97,7 @@ def analyse_task(job):
 
 def gather(parts, table, keys):
     frames = [pd.read_parquet(parts / f"{safe(k)}.{table}.parquet") for k in keys]
-    frames = [f for f in frames if len(f)]
+    frames = [f.dropna(axis=1, how="all") for f in frames if len(f)]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -102,6 +106,8 @@ def main():
     parser.add_argument("db", type=Path, help="database folder written by build_catalog.py")
     parser.add_argument("--workers", type=int, default=2, help="processes analysing tracks (default 2)")
     parser.add_argument("--redo", action="store_true", help="discard the cache and analyse every track again")
+    parser.add_argument("--retry-errors", action="store_true",
+                        help="analyse again the tasks with tracks that failed with an error (not those with no flight)")
     parser.add_argument("--root", type=Path, help="folder holding flymaster_igc, airscore_igc and airtribune_igc, "
                         "if it is not where it was when the catalog was built")
     parser.add_argument("--limit", type=int, help="analyse only this many tasks (for a test)")
@@ -121,6 +127,16 @@ def main():
             for task_key, g in unique.groupby("task_key", sort=True)]
     if args.limit:
         jobs = jobs[:args.limit]
+    if args.retry_errors:
+        retried = 0
+        for j in jobs:
+            path = parts / f"{safe(j[0])}.flights.parquet"
+            if path.exists():
+                err = pd.read_parquet(path, columns=None).get("error")
+                if err is not None and (err.notna() & (err != "no flight found")).any():
+                    (parts / f"{safe(j[0])}.done").unlink(missing_ok=True)
+                    retried += 1
+        print(f"Retrying {retried} tasks with errors", flush=True)
     todo = [j for j in jobs if not (parts / f"{safe(j[0])}.done").exists()]
     print(f"Flights: {len(jobs) - len(todo)} tasks already analysed, {len(todo)} to analyse "
           f"({sum(len(j[2]) for j in todo):,} tracks)", flush=True)
@@ -161,7 +177,9 @@ def main():
               f"circling {f['circling_share'].median():.0%} of the time")
         print("Quality (fix interval):", f["quality"].value_counts().to_dict())
     if (~ok).any():
-        print("Tracks without a flight:", flights.loc[~ok, "error"].str.split(":").str[0].value_counts().head(5).to_dict())
+        why = flights.loc[~ok, "error"].str.split(":").str[0]
+        print("Tracks without a flight:", why.value_counts().head(5).to_dict())
+        print(pd.crosstab(flights.loc[~ok, "source"], why).to_string())
 
 
 if __name__ == "__main__":

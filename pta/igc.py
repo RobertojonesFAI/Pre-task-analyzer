@@ -12,7 +12,8 @@ HEADERS = {  # three-letter IGC header codes kept in the catalog
 
 
 def _lines(data):
-    return data.replace(b"\r", b"").split(b"\n")
+    """Lines of a file with Windows (CR LF), Unix (LF) or old Mac (CR) line ends."""
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
 
 
 def _date(value):

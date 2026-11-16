@@ -83,6 +83,8 @@ def clean(fx):
     alt = fx["alt_gps"].astype(float)
     if len(alt) and (alt == 0).mean() > 0.5 and (fx["alt_baro"] != 0).mean() > 0.5:
         alt = fx["alt_baro"].astype(float)
+    if len(t) == 0:
+        return t, lat, lon, alt
     order = np.argsort(t, kind="stable")
     t, lat, lon, alt = t[order], lat[order], lon[order], alt[order]
     keep = np.concatenate([[True], np.diff(t) > 0])
