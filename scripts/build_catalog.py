@@ -174,7 +174,7 @@ def read_tracks(jobs, parts, workers):
                 part(job), index=False)
             if n % 50 == 0 or n == len(todo):
                 print(f"... {n}/{len(todo)} packages, {(time.time() - started) / 60:.0f} min", flush=True)
-    frames = [pd.read_parquet(part(j)) for j in jobs if part(j).exists()]
+    frames = [f for f in (pd.read_parquet(part(j)) for j in jobs if part(j).exists()) if len(f.columns) > 3]
     tracks = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return tracks[tracks["member"].notna()].reset_index(drop=True) if "member" in tracks else tracks
 
@@ -274,11 +274,20 @@ def main():
 
     turnpoints = pd.DataFrame([{"task_key": t["task_key"], **tp} for t in tasks for tp in t["turnpoints"]])
     tasks = pd.DataFrame(tasks)
-    # Tasks whose results page gave no date (no page, or none in it): the date most of their tracks carry
+    # Tasks whose results gave no date: the date most of their tracks carry, if it falls within the
+    # competition's dates (some loggers write a wrong date), otherwise the competition's first day
+    ev = pd.DataFrame(events).set_index("event_key")
+    start = pd.to_datetime(tasks["event_key"].map(ev["start_date"]), errors="coerce")
+    end = pd.to_datetime(tasks["event_key"].map(ev["end_date"]), errors="coerce")
+    track_date = pd.Series(dtype=object)
     if "date" in tracks:
         track_date = tracks.dropna(subset=["date"]).groupby("task_key")["date"].agg(lambda s: s.mode().iloc[0])
-        tasks["date_from_tracks"] = tasks["date"].isna() & tasks["task_key"].isin(track_date.index)
-        tasks["date"] = tasks["date"].fillna(tasks["task_key"].map(track_date))
+    guess = pd.to_datetime(tasks["task_key"].map(track_date), errors="coerce")
+    inside = guess.between(start - pd.Timedelta(days=2), end + pd.Timedelta(days=2))
+    missing = tasks["date"].isna()
+    tasks["date_from_tracks"] = missing & inside
+    tasks.loc[missing & inside, "date"] = guess[missing & inside].dt.strftime("%Y-%m-%d")
+    tasks.loc[missing & ~inside, "date"] = start[missing & ~inside].dt.strftime("%Y-%m-%d")
     tasks["turnpoints"] = tasks["turnpoints"].map(json.dumps)
     counts = tracks[tracks["duplicate_of"].isna()].groupby("task_key").size()
     tasks["n_tracks"] = tasks["task_key"].map(counts).fillna(0).astype(int)

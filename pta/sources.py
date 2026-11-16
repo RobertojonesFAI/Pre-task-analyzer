@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .util import hms, js_value, norm_name, pair_table, read_tables, strip_tags, to_float, to_int
 
-CERT = re.compile(r"^(EN[- ]?[A-D]|CCC|LTF ?[A-D1-2/]+|DHV ?[1-3/]+|[A-D])$", re.I)
+CERT = re.compile(r"^(EN[- ]?[A-D]|CCC|(?:LTF|DHV) ?[1-3][-/]?[1-3]?|[A-D])$", re.I)
 TASK_TYPES = {"RACE": "race", "ELAPSED-TIME": "elapsed", "ELAPSED_TIME": "elapsed", "ELAPSED": "elapsed",
               "OPEN-DISTANCE": "open_distance"}
 
@@ -36,8 +36,12 @@ def _status(value):
     return STATUS.get(s, s or None)
 
 
+OLD_CLASSES = {"1": "EN-A", "1-2": "EN-B", "1/2": "EN-B", "2": "EN-C", "2-3": "EN-D", "2/3": "EN-D", "3": "CCC"}
+
+
 def _cert(value):
-    """Normalised certification ('en c' -> 'EN-C', 'ccc' -> 'CCC'), or None."""
+    """Normalised certification: 'en c' -> 'EN-C', 'ccc' -> 'CCC'; the older German classes
+    (DHV / LTF 1, 1-2, 2, 2-3) map to their usual EN equivalents. None when unknown."""
     s = strip_tags(value).upper().replace(" ", "")
     if not s or not CERT.match(s):
         return None
@@ -45,6 +49,8 @@ def _cert(value):
         return "EN-" + s
     if s.startswith("EN"):
         return "EN-" + s[-1]
+    if s.startswith(("DHV", "LTF")):
+        return OLD_CLASSES.get(s[3:])
     return s
 
 
