@@ -92,6 +92,26 @@ class DEM:
         return z, lat, lon
 
 
+    def sample(self, lat, lon):
+        """Ground elevation (m) at points, from the nearest DEM pixel; NaN where there is no tile."""
+        lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+        out = np.full(len(lat), np.nan, np.float32)
+        ok = np.isfinite(lat) & np.isfinite(lon)
+        keys = np.floor(lat[ok]).astype(int) * 1000 + np.floor(lon[ok]).astype(int)
+        idx = np.flatnonzero(ok)
+        for key in np.unique(keys):
+            la, lo = (key + 500) // 1000, key - ((key + 500) // 1000) * 1000
+            t = self.tile(int(la), int(lo))
+            if t is None:
+                continue
+            z, tr = t
+            sel = idx[keys == key]
+            r = np.clip(np.floor((tr.f - lat[sel]) / -tr.e).astype(int), 0, z.shape[0] - 1)
+            c = np.clip(np.floor((lon[sel] - tr.c) / tr.a).astype(int), 0, z.shape[1] - 1)
+            out[sel] = z[r, c]
+        return out
+
+
 def _blocks(a, n=PX_PER_CELL):
     """(rows/n, cols/n, n*n) view of an array split into n x n blocks."""
     r, c = a.shape[0] // n, a.shape[1] // n

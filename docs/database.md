@@ -206,3 +206,15 @@ Hourly ERA5 and ERA5-Land in `database/weather/`, for every site on its competit
 | `u_<hPa>`, `v_<hPa>`, `t_<hPa>`, `rh_<hPa>`, `z_<hPa>` | wind, temperature (°C), relative humidity (%) and height (m) at 925, 850, 700, 600 and 500 hPa |
 
 **`era5_land`**: one row per ERA5-Land point (0.1°, `lat`, `lon`, with its `chip_id`) and hour: `sensible_heat_wm2`, `sunshine_wm2` (hourly, from ERA5-Land's daily accumulations), `skin_temp_c`, `soil_moisture` (top layer, m³/m³), `albedo`, `snow_cover` (0–1).
+
+## flight_checks, crossings, thermals, landings
+
+Built by `notebooks/08_crossings_labels.ipynb` (`scripts/build_crossings.py`) from the 5 s fixes and the GLO-30 DEM, for every flight that is not a copy of another file's flight. Heights above ground (`agl`) are GPS altitude minus the DEM (GLO-30 is a surface model, so over forest they are low by the canopy height). Times are seconds since 00:00 UTC of the IGC date, as in `flights`.
+
+**`flight_checks`**: `agl_median`, `agl_p10`, `near_ground_share` (fixes under 50 m above ground), `dem_coverage`, and `is_drive`: at least 60 % of the fixes on the ground, a "flight" that is really a drive (for example several pilots driven down from launch, see `flights.shared_path`). Drives are left out of the other tables' labels.
+
+**`crossings`**: one row per flight and run of fixes in one 1 km cell: `cell_id`, `t_in`, `t_out`, `duration_s`, `agl_in`, `agl_out`, `agl_min`, `circling_s`, `climbing_s` (circling at 0.5 m/s or more), `best_vz`, `mean_vz_climbing`. A cell crossed without climbing is not proof of no thermal (a pilot high above may not have searched); the height above ground in the cell is kept for that reason.
+
+**`thermals`**: one row per thermal (`climbs` with `is_thermal`): position, `cell_id`, `alt_base`, `alt_top`, `agl_base`, `agl_top`, `rate_ms`, `turns`; `wind_u`, `wind_v` (m/s) and `wind_alt`: the wind the pilot measured, from the drift of at least two full turns (the glider's own speed cancels over whole turns; drifts over 30 m/s or climbs shorter than a minute are left empty); `trigger_lat`, `trigger_lon`, `trigger_cell`: the thermal traced back upwind from its base, for the time the air took to rise from the ground at the measured climb rate (at most 30 minutes).
+
+**`landings`**: one row per flight: `t`, `lat`, `lon`, `cell_id` and `agl` of the last fix of the flight, `result_id` (join `results` for goal, ess or landed out) and `is_drive`.
