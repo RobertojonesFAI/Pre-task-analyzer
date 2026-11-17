@@ -12,7 +12,8 @@ Products (--product):
 
     single   the 21 single-level variables era5.py asks the CDS for (era5.DATASETS["single"])
     levels   wind, temperature, humidity and height at 925, 850, 700, 600 and 500 hPa, as in
-             era5_levels. Each read brings all 37 levels of the world (about 150 MB), so by default
+             era5_levels, plus specific humidity (q_<hPa>, g/kg); relative humidity is computed
+             from it, since ARCO does not store it. Each read brings all 37 levels of the world (about 150 MB), so by default
              notebooks read every 3rd hour (--every 3); the hours between can be interpolated.
     extra    more single-level variables for the ground and the air mass: skin temperature, top
              soil moisture, albedo, snow depth, water vapour, freezing level, convective rain,
@@ -62,8 +63,9 @@ assert set(SHORT) == set(DATASETS["single"]["variables"])
 # product -> {ARCO variable: (column, conversion)}; conversion: None, "K" (to °C) or a factor
 PRODUCTS = {
     "single": {name: CONVERT[short] for name, short in SHORT.items()},
+    # ARCO has specific humidity, not relative humidity: rh_<hPa> is computed from it (see add_rh)
     "levels": {"u_component_of_wind": ("u", None), "v_component_of_wind": ("v", None),
-               "temperature": ("t", "K"), "relative_humidity": ("rh", None), "geopotential": ("z", 1 / G)},
+               "temperature": ("t", "K"), "specific_humidity": ("q", 1000.0), "geopotential": ("z", 1 / G)},
     "extra": {"skin_temperature": ("skin_temp_c", "K"), "volumetric_soil_water_layer_1": ("soil_moisture", None),
               "forecast_albedo": ("albedo", None), "snow_depth": ("snow_depth_m", None),
               "total_column_water_vapour": ("water_vapour_kgm2", None), "zero_degree_level": ("freezing_level_m", None),
@@ -75,6 +77,23 @@ STATIC = {"geopotential_at_surface": ("ground_m", 1 / G), "land_sea_mask": ("lan
           "type_of_high_vegetation": ("veg_high_type", None), "type_of_low_vegetation": ("veg_low_type", None),
           "soil_type": ("soil_type", None), "standard_deviation_of_orography": ("relief_std_m", None),
           "lake_cover": ("lake_share", None)}
+
+
+def add_rh(df, levels):
+    """Relative humidity (%) at each level from specific humidity (q_<hPa>, g/kg) and temperature
+    (t_<hPa>, °C), with the saturation pressure ERA5 itself uses: over water above 0 °C, over ice
+    below -23 °C, a mix in between (IFS documentation, part IV, 7.4.2)."""
+    for lvl in levels:
+        if f"q_{lvl}" not in df or f"t_{lvl}" not in df:
+            continue
+        q = df[f"q_{lvl}"].to_numpy("float64") / 1000.0
+        t = df[f"t_{lvl}"].to_numpy("float64") + 273.15
+        e = q * lvl * 100.0 / (0.621981 + 0.378019 * q)            # vapour pressure, Pa
+        es_water = 611.21 * np.exp(17.502 * (t - 273.16) / (t - 32.19))
+        es_ice = 611.21 * np.exp(22.587 * (t - 273.16) / (t + 0.7))
+        a = np.clip((t - 250.16) / (273.16 - 250.16), 0.0, 1.0) ** 2
+        df[f"rh_{lvl}"] = (100.0 * e / (a * es_water + (1 - a) * es_ice)).astype("float32")
+    return df
 
 
 def convert_values(x, conv):
@@ -169,6 +188,8 @@ def read_hours(ds, wanted, variables, threads, levels=None):
     if not frames:
         return pd.DataFrame()
     df = pd.concat([pd.DataFrame(f) for f in frames.values()], ignore_index=True)
+    if levels:
+        df = add_rh(df, levels)
     cols = [c for c in df.columns if c not in ("chip_id", "time")]
     return df.dropna(subset=cols, how="all")  # an hour ARCO does not have yet
 
