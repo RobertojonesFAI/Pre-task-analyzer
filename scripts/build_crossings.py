@@ -269,7 +269,9 @@ def main():
         print(f"Thermals: base {th['agl_base'].median():.0f} m and top {th['agl_top'].median():.0f} m above ground "
               f"(median); wind measured in {th['wind_u'].notna().mean():.0%} of them, "
               f"median {np.hypot(th['wind_u'], th['wind_v']).median():.1f} m/s")
-    if len(land):
+    if len(land) and "agl_raw" not in land:
+        print("These tables come from an earlier version without the altitude calibration: run with --redo.")
+    elif len(land):
         fl = ~land["is_drive"]
         print(f"Landings: median {land.loc[fl, 'agl_raw'].median():.0f} m above ground before calibration, "
               f"{land.loc[fl, 'agl'].median():.0f} m after")
