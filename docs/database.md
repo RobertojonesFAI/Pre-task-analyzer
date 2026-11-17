@@ -209,7 +209,7 @@ Hourly ERA5 and ERA5-Land in `database/weather/`, for every site on its competit
 
 **`era5_static`** (ARCO-ERA5, `--product static`): one row per chip: `ground_m` (ERA5's own smoothed ground height, which `blh_m` and `cloud_base_m` are measured from), `land_share`, `veg_high`, `veg_low` (cover 0–1), `veg_high_type`, `veg_low_type`, `soil_type` (ECMWF codes), `relief_std_m` (sub-grid relief), `lake_share`.
 
-Pressure levels from ARCO-ERA5 (notebook 07c) are read every 3rd UTC hour; those from the CDS are hourly.
+Pressure levels from ARCO-ERA5 (notebook 07c) are read every 3rd UTC hour (those from the CDS are hourly) and add `q_<hPa>`, specific humidity in g/kg; ARCO does not store relative humidity, so `rh_<hPa>` is computed from it and the temperature with ERA5's own saturation formula (over water above 0 °C, over ice below −23 °C, mixed in between).
 
 **`era5_land`**: one row per ERA5-Land point (0.1°, `lat`, `lon`, with its `chip_id`) and hour: `sensible_heat_wm2`, `sunshine_wm2` (hourly, from ERA5-Land's daily accumulations), `skin_temp_c`, `soil_moisture` (top layer, m³/m³), `albedo`, `snow_cover` (0–1).
 
