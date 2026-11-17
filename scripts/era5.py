@@ -323,8 +323,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("db", type=Path, help="database folder (with sites from build_sites.py)")
     parser.add_argument("--weather", type=Path, help="output folder (default DB/weather)")
-    parser.add_argument("--parallel", type=int, default=4, help="requests queued at the CDS at a time (default 4; "
-                        "the CDS works through one or a few per user at a time, so more only wait in its queue)")
+    parser.add_argument("--parallel", type=int, default=8, help="requests queued at the CDS at a time (default 8; "
+                        "the CDS finishes queued requests in batches, so fewer in the queue means fewer per hour)")
     parser.add_argument("--box", type=float, default=BOX_DEG, help=f"largest regional box, degrees (default {BOX_DEG:g})")
     parser.add_argument("--datasets", default=",".join(DATASETS), help="which datasets, in this order (default single,levels,land)")
     parser.add_argument("--plan-only", action="store_true", help="print the requests and stop")
