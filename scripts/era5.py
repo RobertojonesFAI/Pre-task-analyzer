@@ -14,6 +14,9 @@ boxes of up to BOX_DEG degrees, so one request serves several sites. Three datas
     land       ERA5-Land (0.1°): sensible heat flux, skin temperature, soil moisture, albedo,
                snow cover, sunshine
 
+Single levels can instead be read from ARCO-ERA5 on Google Cloud Storage (era5_arco.py, much faster
+than the CDS queue); run this script with --datasets levels,land and the conversion merges both.
+
 Raw files go to WEATHER/raw/<dataset>/, so a second run only asks for what is missing. They are
 then converted to tidy tables:
 
@@ -283,7 +286,8 @@ def convert(weather, wanted_chips):
     """Tidy tables from every raw file."""
     for dataset in DATASETS:
         files = sorted((weather / "raw" / dataset).glob("*.nc"))
-        if not files:
+        arco = sorted((weather / "arco" / dataset).glob("*.parquet"))  # from era5_arco.py (single levels)
+        if not files and not arco:
             continue
         frames = []
         for path in files:
@@ -292,7 +296,7 @@ def convert(weather, wanted_chips):
             for p in parts[1:]:
                 df = df.merge(p, on=["time", "latitude", "longitude"], how="outer")
             frames.append(df)
-        df = pd.concat(frames, ignore_index=True)
+        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["time", "latitude", "longitude"])
         df = df.drop_duplicates(["time", "latitude", "longitude"], keep="last")
         if dataset == "land":
             df = _deaccumulate_land(df)
@@ -302,6 +306,9 @@ def convert(weather, wanted_chips):
         else:
             df["chip_id"] = grid.chip_id(df["latitude"].round(2).to_numpy(), df["longitude"].round(2).to_numpy())
             df = df[df["chip_id"].isin(wanted_chips)].drop(columns=["latitude", "longitude"])
+            if arco:  # the same variables read from ARCO-ERA5; together they cover every hour
+                df = pd.concat(([df] if frames else []) + [pd.read_parquet(p) for p in arco], ignore_index=True)
+                df = df[df["chip_id"].isin(wanted_chips)].drop_duplicates(["chip_id", "time"], keep="last")
         cols = ["chip_id", "time"] + [c for c in df.columns if c not in ("chip_id", "time")]
         df = df[cols].sort_values(["chip_id", "time"]).reset_index(drop=True)
         for c in df.columns[2:]:
@@ -331,7 +338,7 @@ def main():
     jobs = plan(args.db, args.box, datasets)
     todo = [j for j in jobs if not have(weather, j)]
     months = len({(j["year"], j["month"]) for j in jobs})
-    print(f"ERA5: {len(jobs) // len(DATASETS):,} regional requests in {months} months × {len(DATASETS)} datasets; "
+    print(f"ERA5: {len(jobs) // len(datasets):,} regional requests in {months} months × {len(datasets)} datasets; "
           f"{len(jobs) - len(todo):,} files already here, {len(todo):,} to ask for", flush=True)
     if args.plan_only:
         for b in (12, 20, 25, 35):

@@ -1,6 +1,6 @@
 # Competition database
 
-Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model, and by `notebooks/07_weather_era5.ipynb` (`scripts/era5.py`) from ERA5. They can be read with pandas or queried with SQL through DuckDB, with no database server:
+Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model, and by `notebooks/07_weather_era5.ipynb` and `07b_weather_arco.ipynb` (`scripts/era5.py`, `scripts/era5_arco.py`) from ERA5. They can be read with pandas or queried with SQL through DuckDB, with no database server:
 
 ```python
 import duckdb
@@ -190,7 +190,7 @@ Terrain of every 1 km cell of the site chips, from the Copernicus GLO-30 DEM (30
 
 ## weather
 
-Hourly ERA5 and ERA5-Land in `database/weather/`, for every site on its competition days and the day before each (`scripts/era5.py`). Times are UTC. Raw downloads stay in `weather/raw/`.
+Hourly ERA5 and ERA5-Land in `database/weather/`, for every site on its competition days and the day before each (`scripts/era5.py`). Times are UTC. Raw downloads stay in `weather/raw/`. Single levels can also come from ARCO-ERA5 on Google Cloud Storage (`scripts/era5_arco.py`, notebook 07b), saved by month in `weather/arco/single/` and merged into `era5_single`; those cover 5 to 21 h local solar time of each site's days, the CDS downloads all 24 hours.
 
 **`era5_single`** and **`era5_levels`**: one row per chip and hour; a chip's weather is the ERA5 grid point at its centre (`pta.grid.chip_centre`).
 
