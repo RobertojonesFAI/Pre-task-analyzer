@@ -50,6 +50,8 @@ data/        small tables only (catalogs); tracks live in Google Drive
 | 7c | `notebooks/07c_weather_arco_levels.ipynb` | ERA5 pressure levels from ARCO-ERA5, every 3rd hour (each read brings all 37 levels of the world); notebook 07 then asks the CDS only for ERA5-Land | `database/weather/arco/levels/`, merged into `era5_levels` |
 | 7d | `notebooks/07d_weather_arco_extra.ipynb` | More from ARCO-ERA5: ERA5's own ground height, land share, vegetation and soil per chip, and hourly skin temperature, soil moisture, albedo, snow depth, water vapour, freezing level, convective rain and friction velocity | `database/weather/era5_static`, `era5_extra` |
 | 8 | `notebooks/08_crossings_labels.ipynb` | Labels from the flights (`scripts/build_crossings.py`): height above ground of every fix, drives down from launch removed, the 1 km cells each flight crossed and whether it climbed there, every thermal's base and top above ground with the wind the pilot measured and its trigger point, and every landing | `database/flight_checks`, `crossings`, `thermals`, `landings` |
+| 9 | `notebooks/09_thermal_model.ipynb` | Thermal model v0 (`scripts/thermal_model.py`): the chance that a pilot crossing a 1 km cell finds a climb, from height on arrival, terrain, sun on the slopes and ERA5, scored on sites left out and compared group by group; the pilots' ceilings against ERA5's boundary layer; the data for the web page (`scripts/export_web.py`) | `database/models/thermal_v0/`, `database/web_data/` |
+| 10 | `notebooks/10_task_basics.ipynb` | Glider models and classes (`scripts/gliders.py`), Elo pilot ratings before every task and field strength (`scripts/pilot_ratings.py`), and the task baseline without weather: winner's speed and time and goal share (`scripts/task_baseline.py`) | `database/result_gliders`, `gliders`, `ratings`, `pilot_ratings`, `task_fields`, `models/task_v0/` |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
 
@@ -57,12 +59,14 @@ The tracks are too big for git. They live in the project's Google Drive folder.
 
 In order of priority for the end of the semester (December 2026):
 
-1. **Weather base (07, written):** ERA5 and ERA5-Land for every site, hourly, on the days of each competition (ARCO-ERA5 for single and pressure levels, Copernicus Climate Data Store for ERA5-Land).
+1. **Weather base (07, done):** ERA5 and ERA5-Land for every site, hourly, on the days of each competition (ARCO-ERA5 for single and pressure levels, Copernicus Climate Data Store for ERA5-Land).
 2. **Energy on the slopes:** sunlight on each cell's slopes with shading by neighbouring mountains, clouds, albedo and land cover, and the trigger point of each thermal traced back upwind.
    **Wind over the terrain (2b):** WindNinja (US Forest Service) run per site for a table of inflow directions and speeds, giving terrain-scale wind (speed-up over ridges, channelling in valleys, lee sides) for every hour by interpolating with the ERA5 wind.
 3. **Validation against the pilots:** weather sources compared with the ceilings of the real thermals and with radiosonde soundings (IGRA2); terrain winds compared with the wind pilots measured (the drift of their circles in thermals).
 4. **HRRR** as a regional layer for the United States.
 5. **CERRA** as a regional layer for Europe.
+
+The web page (`web/`, Astro + MapLibre on Cloudflare Pages) maps the sites and, per site, how often pilots found a climb in each cell and what the thermal model predicts; see [web/README.md](web/README.md).
 
 Extension: a CFD surrogate trained on OpenFOAM simulations of competition terrain (wind at flight heights, which WindNinja does not give), kept if it beats WindNinja against the winds pilots measured.
 

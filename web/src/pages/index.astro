@@ -1,0 +1,69 @@
+---
+import "maplibre-gl/dist/maplibre-gl.css";
+import "../styles/global.css";
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pre-task Analyzer</title>
+    <meta name="description" content="Where paragliding competition pilots find thermals, from their tracks, the terrain and the weather." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%23eb6834'/></svg>" />
+  </head>
+  <body>
+    <aside class="panel" id="panel">
+      <header class="brand">
+        <h1>Pre-task Analyzer</h1>
+        <p class="lede">Where competition pilots find thermals: every crossing of a 1 km cell, from their tracks, the terrain and the weather.</p>
+      </header>
+
+      <section class="tiles" id="tiles" aria-label="Totals">
+        <div class="tile"><span class="num" id="t-sites">–</span><span class="lbl">sites</span></div>
+        <div class="tile"><span class="num" id="t-comps">–</span><span class="lbl">competitions</span></div>
+        <div class="tile"><span class="num" id="t-flights">–</span><span class="lbl">flights</span></div>
+        <div class="tile"><span class="num" id="t-cells">–</span><span class="lbl">cells</span></div>
+      </section>
+
+      <section class="layer" aria-label="Map layer">
+        <div class="seg" role="radiogroup">
+          <button role="radio" aria-checked="true" data-layer="climb_pct" class="on">Observed</button>
+          <button role="radio" aria-checked="false" data-layer="predicted_pct">Model</button>
+        </div>
+        <p class="hint" id="layer-hint">Share of pilots who found a climb when they crossed the cell.</p>
+      </section>
+
+      <section class="site" id="site" hidden>
+        <button class="back" id="back">← All sites</button>
+        <h2 id="s-name"></h2>
+        <p class="meta" id="s-meta"></p>
+        <dl class="facts" id="s-facts"></dl>
+      </section>
+
+      <section class="list" id="list-wrap">
+        <label class="search"><span class="sr">Search sites</span>
+          <input id="search" type="search" placeholder="Search sites or countries" autocomplete="off" />
+        </label>
+        <ol class="sites" id="sites"></ol>
+      </section>
+
+      <footer class="foot" id="foot"></footer>
+    </aside>
+
+    <main class="map-wrap">
+      <div id="map" aria-label="Map of sites and thermal cells"></div>
+      <div class="legend" id="legend" hidden>
+        <div class="legend-title" id="legend-title">Found a climb</div>
+        <div class="legend-bar"></div>
+        <div class="legend-scale"><span>0%</span><span>25%</span><span>50%</span><span>75%+</span></div>
+      </div>
+      <div class="tip" id="tip" hidden></div>
+      <p class="empty" id="empty" hidden>No data yet: run <code>scripts/export_web.py</code> into <code>web/public/data</code>.</p>
+    </main>
+
+    <script>
+      import { start } from "../scripts/map";
+      start();
+    </script>
+  </body>
+</html>
