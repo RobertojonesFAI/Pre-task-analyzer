@@ -15,7 +15,7 @@ Reads the flights (notebook 05: flights, climbs and the 5 s fixes) and the GLO-3
     landings        one row per flight: landing cell, time and height above ground, with the
                     pilot's official status (goal, ess, lo)
 
-Heights above ground are calibrated per flight on its landing (the last 30 s are on the ground),
+Heights above ground are calibrated per flight on its landing (the last 10 s are on the ground),
 which removes each logger's altitude error, such as the geoid height when it records height above
 the WGS84 ellipsoid.
 
@@ -41,14 +41,15 @@ from pta import grid, terrain  # noqa: E402
 
 TABLES = ("flight_checks", "crossings", "thermals", "landings")
 NEAR_GROUND_M = 50        # a fix this close to the ground counts as on the ground
-DRIVE_SHARE = 0.6         # a "flight" with this share of its fixes on the ground is a drive
+DRIVE_SHARE = 0.6         # a "flight" with this share of its fixes on the ground is a drive...
 CLIMB_VZ = 0.5            # m/s: circling at least this fast counts as climbing
 MIN_WIND_TURNS = 2        # a thermal needs this many turns for its drift to measure the wind
 MAX_RISE_S = 1800         # tracing a thermal back: at most this long from the ground to its base
 MIN_WIND_S = 60           # ...and at least this long
 MAX_WIND_MS = 30          # a drift faster than this is a GPS or logging error, not wind
 MAX_OFFSET_M = 150        # largest altitude error corrected from the landing (geoid, barometric drift)
-LANDING_FIXES = 6         # the last fixes of a flight (30 s at 5 s) measure that error
+LANDING_FIXES = 2         # the last fixes of a flight (10 s at 5 s, after the final approach) measure that error
+DRIVE_MAX_CIRCLING = 0.05 # ...and circles less than this share of the time (cars do not circle in thermals)
 
 
 def safe(task_key):
@@ -87,13 +88,14 @@ def analyse_task(job):
         agl = g["agl"].to_numpy()
         known = np.isfinite(agl)
         near = float((agl[known] < NEAR_GROUND_M).mean()) if known.any() else np.nan
-        is_drive = bool(known.any() and near >= DRIVE_SHARE)
+        circling_share = float(g["circling"].mean())
+        is_drive = bool(known.any() and near >= DRIVE_SHARE and circling_share < DRIVE_MAX_CIRCLING)
         out["flight_checks"].append({
             "track_id": f.track_id, "task_key": task_key,
             "agl_median": float(np.nanmedian(agl)) if known.any() else np.nan,
             "agl_p10": float(np.nanpercentile(agl, 10)) if known.any() else np.nan,
             "near_ground_share": near, "is_drive": is_drive, "dem_coverage": float(known.mean()),
-            "agl_offset": offset, "landing_agl_raw": landing_agl,
+            "agl_offset": offset, "landing_agl_raw": landing_agl, "circling_share": circling_share,
         })
 
         # landing
