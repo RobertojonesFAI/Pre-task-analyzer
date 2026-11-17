@@ -1,6 +1,6 @@
 # Competition database
 
-Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model, and by `notebooks/07_weather_era5.ipynb` and `07b_weather_arco.ipynb` (`scripts/era5.py`, `scripts/era5_arco.py`) from ERA5. They can be read with pandas or queried with SQL through DuckDB, with no database server:
+Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model, and by `notebooks/07_weather_era5.ipynb` and `07b`–`07d` (`scripts/era5.py`, `scripts/era5_arco.py`) from ERA5. They can be read with pandas or queried with SQL through DuckDB, with no database server:
 
 ```python
 import duckdb
@@ -204,6 +204,12 @@ Hourly ERA5 and ERA5-Land in `database/weather/`, for every site on its competit
 | `t2m_c`, `dewpoint_c`, `pressure_hpa`, `rain_mmh` | 2 m temperature and dew point, surface pressure, rain |
 | `u10`, `v10`, `u100`, `v100`, `gust10` | wind at 10 and 100 m (m/s, towards east and north) and gusts |
 | `u_<hPa>`, `v_<hPa>`, `t_<hPa>`, `rh_<hPa>`, `z_<hPa>` | wind, temperature (°C), relative humidity (%) and height (m) at 925, 850, 700, 600 and 500 hPa |
+
+**`era5_extra`** (ARCO-ERA5 only, `--product extra`): one row per chip and hour: `skin_temp_c`, `soil_moisture` (top layer, m³/m³), `albedo`, `snow_depth_m` (water equivalent), `water_vapour_kgm2` (whole column), `freezing_level_m` (height of 0 °C above the ground), `conv_rain_mmh`, `friction_velocity` (m/s).
+
+**`era5_static`** (ARCO-ERA5, `--product static`): one row per chip: `ground_m` (ERA5's own smoothed ground height, which `blh_m` and `cloud_base_m` are measured from), `land_share`, `veg_high`, `veg_low` (cover 0–1), `veg_high_type`, `veg_low_type`, `soil_type` (ECMWF codes), `relief_std_m` (sub-grid relief), `lake_share`.
+
+Pressure levels from ARCO-ERA5 (notebook 07c) are read every 3rd UTC hour; those from the CDS are hourly.
 
 **`era5_land`**: one row per ERA5-Land point (0.1°, `lat`, `lon`, with its `chip_id`) and hour: `sensible_heat_wm2`, `sunshine_wm2` (hourly, from ERA5-Land's daily accumulations), `skin_temp_c`, `soil_moisture` (top layer, m³/m³), `albedo`, `snow_cover` (0–1).
 
