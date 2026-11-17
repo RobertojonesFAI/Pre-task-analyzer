@@ -1,0 +1,14 @@
+{
+  "name": "pre-task-analyzer-web",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "astro": "7.4.12",
+    "maplibre-gl": "6.19.0"
+  }
+}

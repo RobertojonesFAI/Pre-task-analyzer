@@ -224,3 +224,17 @@ Built by `notebooks/08_crossings_labels.ipynb` (`scripts/build_crossings.py`) fr
 **`thermals`**: one row per thermal (`climbs` with `is_thermal`): position, `cell_id`, `alt_base`, `alt_top`, `agl_base`, `agl_top`, `rate_ms`, `turns`; `wind_u`, `wind_v` (m/s) and `wind_alt`: the wind the pilot measured, from the drift of at least two full turns (the glider's own speed cancels over whole turns; drifts over 30 m/s or climbs shorter than a minute are left empty); `trigger_lat`, `trigger_lon`, `trigger_cell`: the thermal traced back upwind from its base, for the time the air took to rise from the ground at the measured climb rate (at most 30 minutes).
 
 **`landings`**: one row per flight: `t`, `lat`, `lon`, `cell_id` and `agl` of the last fix of the flight, `result_id` (join `results` for goal, ess or landed out) and `is_drive`.
+
+## Gliders and pilot ratings
+
+Built by `notebooks/10_task_basics.ipynb` from `results`.
+
+**`result_gliders`**: one row per result: `glider_key` (the model with brand, size and spelling removed: "OZONE Enzo 3 MS" → `enzo3`), `glider_class` (`CCC`, `EN-D`, `EN-C`, `EN-B`, `EN-A`) and `class_source`: `declared` (the class most results with that key publish), `curated` (a short list of well-known competition families, used only when no result declares one) or `unknown`. **`gliders`** has one row per key with its most common spelling and number of results.
+
+**`ratings`**: one row per pilot and task: `rating_before` and `tasks_before` (an Elo rating over head-to-head results within each task, in date order, recorded before the task so a model of the task only sees the past), `place` and `n_pilots`. **`pilot_ratings`**: each pilot's latest `rating`, `tasks` and `last_date`. **`task_fields`**: per task, the mean rating before the task of its top 10 (`field_top10`), top 30 (`field_top30`) and whole field (`field_mean`), and how many pilots had flown a rated task before (`n_rated`).
+
+## models
+
+`models/thermal_v0/` (notebook 09): `metrics.json` (scores per feature group on sites left out, calibration, climb-rate model, ceiling check), `importance.csv`, `model.txt` (LightGBM), `oof.parquet` (each crossing's out-of-fold prediction), `cells.parquet` (per cell: crossings, observed and predicted climb share, mean climb rate), `ceiling.parquet` (90th percentile of thermal tops per chip and hour with ERA5's boundary layer and cloud base).
+
+`models/task_v0/` (notebook 10): `metrics.json`, `predictions.parquet` (out-of-fold winner's speed and goal share, by competition and by site left out), `importance.csv`.
