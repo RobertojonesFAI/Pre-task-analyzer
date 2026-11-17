@@ -24,7 +24,7 @@ Models are compared by adding the groups one at a time (pilot + terrain, + sun, 
 Also checks the pilots' ceilings against ERA5's boundary layer (`--ceiling`).
 
 Writes DB/models/thermal_v0/: metrics.json, importance.csv, model.txt (LightGBM, all data),
-oof.parquet (out-of-fold predictions per crossing), cells.parquet (per cell: crossings, observed
+oof.parquet (out-of-fold predictions per crossing: p_terrain, p_sun, p_full), cells.parquet (per cell: crossings, observed
 and predicted climb share, mean climb rate), ceiling.parquet.
 
     python3 scripts/thermal_model.py /content/drive/MyDrive/IGCS/database --max-rows 4000000
@@ -58,6 +58,7 @@ WEATHER = ["blh_m", "cloud_base_m", "cape", "cin", "sensible_heat_wm2", "latent_
 EXTRA = ["skin_minus_air_c", "soil_moisture", "albedo", "snow_depth_m", "water_vapour_kgm2", "freezing_level_m",
          "conv_rain_mmh"]
 LEVELS = ["lapse_850_700", "lapse_700_500", "rh_700", "rh_850", "wind_700", "shear_700"]
+NAMES = {"pilot + terrain": "p_terrain", "+ sun": "p_sun", "+ weather": "p_full"}   # columns of oof.parquet
 GROUPS = {
     "pilot + terrain": PILOT + TERRAIN,
     "+ sun": PILOT + TERRAIN + SUN,
@@ -131,6 +132,8 @@ def _join(cx, path, cols, time_key=None):
     w = w[w["chip_id"].isin(cx["chip_id"].unique())]
     if time_key:
         w = w.rename(columns={"time": time_key}).drop_duplicates(["chip_id", time_key])
+        w[time_key] = pd.to_datetime(w[time_key]).astype("datetime64[ns]")   # same time unit on both sides
+        cx[time_key] = pd.to_datetime(cx[time_key]).astype("datetime64[ns]")
         return cx.merge(w, on=["chip_id", time_key], how="left"), True
     return cx.merge(w.drop_duplicates("chip_id"), on="chip_id", how="left"), True
 
@@ -366,7 +369,7 @@ def main():
         log("\nWhat the model uses most (share of gain):\n"
             + imp.head(15).assign(share=lambda x: x["share"].map("{:.1%}".format))[["feature", "share"]].to_string(index=False))
     pd.DataFrame({"cell_id": cx["cell_id"], "site_id": cx["site_id"], "time": cx["time"], "agl_in": cx["agl_in"],
-                  "climb": y, **{f"p_{k.strip('+ ').replace(' ', '_')}": v.astype("float32") for k, v in oof.items()}}
+                  "climb": y, **{NAMES[k]: v.astype("float32") for k, v in oof.items()}}
                  ).to_parquet(out / "oof.parquet", index=False)
     cells = cx.assign(p=p).groupby("cell_id").agg(
         site_id=("site_id", "first"), lat=("lat", "first"), lon=("lon", "first"), crossings=("climb", "size"),
