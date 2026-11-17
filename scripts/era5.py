@@ -173,18 +173,25 @@ def raw_path(weather, job):
     return weather / "raw" / job["dataset"] / f"{job['name']}.nc"
 
 
+def got(weather, job):
+    """The request's file is here, or all the parts it was split into (marked by <name>.parts)."""
+    path = raw_path(weather, job)
+    return path.exists() or path.with_suffix(".parts").exists()
+
+
 def have(weather, job):
     """Already downloaded: this request's file, or files from an earlier run with another box size
     whose boxes, together, cover all of this request's sites for the month (recorded in the
     .sites.json written next to each file)."""
-    if raw_path(weather, job).exists():
+    if got(weather, job):
         return True
     import json
 
     folder = weather / "raw" / job["dataset"]
     covered = set()
     for meta in folder.glob(f"{job['year']}-{job['month']:02d}_*.sites.json"):
-        if meta.with_name(meta.name.replace(".sites.json", ".nc")).exists():
+        name = meta.name.replace(".sites.json", "")
+        if (folder / f"{name}.nc").exists() or (folder / f"{name}.parts").exists():
             covered |= set(json.loads(meta.read_text()))
     return set(job["sites"]) <= covered
 
@@ -206,19 +213,32 @@ def note_old_files(db, weather):
             p.with_name(p.name.replace(".nc", ".sites.json")).write_text(json.dumps(sites[key]))
 
 
-def download(job, weather, key):
+def download(job, weather, key, part=False):
+    """Download one request. The CDS refuses requests over its cost limit (variables x levels x
+    days x hours); such a request is split in two by days, again if needed, and the parts are
+    downloaded one after the other (<name>_d0.nc, <name>_d1.nc, ...; <name>.parts marks them done)."""
+    import json
+
     import cdsapi
 
     dest = raw_path(weather, job)
-    if dest.exists():
+    if got(weather, job):
         return job, "cached"
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".part")
     client = cdsapi.Client(url=CDS_URL, key=key, quiet=True, progress=False)
-    client.retrieve(DATASETS[job["dataset"]]["name"], request(job), str(tmp))
-    import json
-    dest.with_name(dest.name.replace(".nc", ".sites.json")).write_text(json.dumps(job["sites"]))
-    tmp.rename(dest)  # may hold a zip of several netCDF files; read() handles both
+    try:
+        client.retrieve(DATASETS[job["dataset"]]["name"], request(job), str(tmp))
+        tmp.rename(dest)  # may hold a zip of several netCDF files; read() handles both
+    except Exception as e:  # noqa: BLE001
+        if "cost limit" not in str(e).lower() or len(job["days"]) < 2:
+            raise
+        half = len(job["days"]) // 2
+        for i, days in enumerate((job["days"][:half], job["days"][half:])):
+            download({**job, "days": days, "name": f"{job['name']}_d{i}"}, weather, key, part=True)
+        dest.with_suffix(".parts").write_text(json.dumps(job["days"]))
+    if not part:  # parts alone do not cover the sites for the whole month
+        dest.with_name(dest.name.replace(".nc", ".sites.json")).write_text(json.dumps(job["sites"]))
     return job, "ok"
 
 
@@ -364,9 +384,10 @@ def main():
                     with open(weather / "failed.txt", "a") as log:
                         log.write(f"{time.strftime('%Y-%m-%d %H:%M')} {j['dataset']} {j['name']}: {str(e)[:300]}\n")
                     print(f"    {j['dataset']} {j['name']} failed: {str(e)[:200]}", flush=True)
-                size = raw_path(weather, j).stat().st_size / 1e6 if raw_path(weather, j).exists() else 0
+                folder = raw_path(weather, j).parent
+                size = sum(p.stat().st_size for p in folder.glob(f"{j['name']}*.nc")) / 1e6
                 print(f"... {done + failed}/{len(todo)}  {j['dataset']} {j['name']} ({size:.1f} MB)"
-                      f"{' FAILED' if not raw_path(weather, j).exists() else ''}, "
+                      f"{' FAILED' if not got(weather, j) else ''}, "
                       f"{(time.time() - started) / 60:.0f} min", flush=True)
         if failed:
             print(f"{failed} requests failed (see {weather / 'failed.txt'}); run again to retry them.")
