@@ -194,14 +194,25 @@ def main():
 
     dem_dir = args.dem
     if args.local and tasks:
+        # copy the tiles in parallel (one at a time from a Drive mount is very slow), skipping
+        # those already copied, and only the tiles under the flights
         args.local.mkdir(parents=True, exist_ok=True)
-        copied = 0
-        for src in args.dem.glob("*.tif"):
-            dst = args.local / src.name
-            if not dst.exists() or dst.stat().st_size != src.stat().st_size:
-                shutil.copyfile(src, dst)
-                copied += 1
-        print(f"Copied {copied} tiles to {args.local}", flush=True)
+        chips = pd.read_parquet(args.db / "site_chips.parquet")["chip_id"].unique()
+        names = {terrain.tile_name(*t) + ".tif" for c in chips for t in terrain.tiles_for_box(*grid.chip_bounds(c))}
+        todo_tiles = [args.dem / n for n in sorted(names) if (args.dem / n).exists()
+                      and not ((args.local / n).exists() and (args.local / n).stat().st_size == (args.dem / n).stat().st_size)]
+        print(f"Copying {len(todo_tiles)} tiles to {args.local} ({len(names)} needed)", flush=True)
+
+        def copy(src):
+            tmp = args.local / (src.name + ".part")
+            shutil.copyfile(src, tmp)
+            tmp.rename(args.local / src.name)
+
+        started = time.time()
+        with ThreadPoolExecutor(16) as pool:
+            for n, _ in enumerate(pool.map(copy, todo_tiles), 1):
+                if n % 50 == 0 or n == len(todo_tiles):
+                    print(f"... {n}/{len(todo_tiles)} tiles, {(time.time() - started) / 60:.0f} min", flush=True)
         dem_dir = args.local
 
     f_by, c_by = dict(tuple(flights.groupby("task_key"))), dict(tuple(climbs.groupby("task_key")))
