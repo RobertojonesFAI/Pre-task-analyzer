@@ -14,8 +14,9 @@ boxes of up to BOX_DEG degrees, so one request serves several sites. Three datas
     land       ERA5-Land (0.1°): sensible heat flux, skin temperature, soil moisture, albedo,
                snow cover, sunshine
 
-Single levels can instead be read from ARCO-ERA5 on Google Cloud Storage (era5_arco.py, much faster
-than the CDS queue); run this script with --datasets levels,land and the conversion merges both.
+Single and pressure levels can instead be read from ARCO-ERA5 on Google Cloud Storage
+(era5_arco.py, much faster than the CDS queue); then run this script with --datasets land, and the
+conversion merges both sources (and builds era5_extra from ARCO's extra variables).
 
 Raw files go to WEATHER/raw/<dataset>/, so a second run only asks for what is missing. They are
 then converted to tidy tables:
@@ -302,11 +303,14 @@ def _deaccumulate_land(df):
     return df
 
 
-def convert(weather, wanted_chips):
-    """Tidy tables from every raw file."""
-    for dataset in DATASETS:
+TABLES = (*DATASETS, "extra")   # extra: only from ARCO-ERA5 (era5_arco.py --product extra)
+
+
+def convert(weather, wanted_chips, tables=TABLES):
+    """Tidy tables from every raw file and every month read from ARCO-ERA5."""
+    for dataset in tables:
         files = sorted((weather / "raw" / dataset).glob("*.nc"))
-        arco = sorted((weather / "arco" / dataset).glob("*.parquet"))  # from era5_arco.py (single levels)
+        arco = sorted((weather / "arco" / dataset).glob("*.parquet"))  # from era5_arco.py
         if not files and not arco:
             continue
         frames = []
@@ -349,6 +353,7 @@ def main():
     parser.add_argument("--datasets", default=",".join(DATASETS), help="which datasets, in this order (default single,levels,land)")
     parser.add_argument("--plan-only", action="store_true", help="print the requests and stop")
     parser.add_argument("--convert-only", action="store_true", help="only rebuild the tables from the raw files")
+    parser.add_argument("--tables", default=",".join(TABLES), help=f"tables to build (default {','.join(TABLES)})")
     args = parser.parse_args()
     weather = args.weather or args.db / "weather"
     weather.mkdir(parents=True, exist_ok=True)
@@ -394,7 +399,7 @@ def main():
 
     print("\nConverting", flush=True)
     wanted = set(pd.read_parquet(args.db / "site_chips.parquet")["chip_id"])
-    convert(weather, wanted)
+    convert(weather, wanted, tuple(t for t in args.tables.split(",") if t in TABLES))
 
 
 if __name__ == "__main__":
