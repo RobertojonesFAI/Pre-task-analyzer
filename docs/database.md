@@ -209,7 +209,7 @@ Hourly ERA5 and ERA5-Land in `database/weather/`, for every site on its competit
 
 ## flight_checks, crossings, thermals, landings
 
-Built by `notebooks/08_crossings_labels.ipynb` (`scripts/build_crossings.py`) from the 5 s fixes and the GLO-30 DEM, for every flight that is not a copy of another file's flight. Heights above ground (`agl`) are GPS altitude minus the DEM (GLO-30 is a surface model, so over forest they are low by the canopy height). Times are seconds since 00:00 UTC of the IGC date, as in `flights`.
+Built by `notebooks/08_crossings_labels.ipynb` (`scripts/build_crossings.py`) from the 5 s fixes and the GLO-30 DEM, for every flight that is not a copy of another file's flight. Heights above ground (`agl`) are GPS altitude minus the DEM (GLO-30 is a surface model, so over forest they are low by the canopy height), calibrated per flight on its landing: the median height over the last 30 s, when the pilot is on the ground, is the logger's altitude error (many loggers record height above the WGS84 ellipsoid instead of sea level, tens of metres apart depending on the region) and is subtracted from the whole flight when it is within ±150 m (`flight_checks.agl_offset`; `landings.agl_raw` keeps the uncalibrated value). Times are seconds since 00:00 UTC of the IGC date, as in `flights`.
 
 **`flight_checks`**: `agl_median`, `agl_p10`, `near_ground_share` (fixes under 50 m above ground), `dem_coverage`, and `is_drive`: at least 60 % of the fixes on the ground, a "flight" that is really a drive (for example several pilots driven down from launch, see `flights.shared_path`). Drives are left out of the other tables' labels.
 
