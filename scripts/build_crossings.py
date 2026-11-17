@@ -15,6 +15,10 @@ Reads the flights (notebook 05: flights, climbs and the 5 s fixes) and the GLO-3
     landings        one row per flight: landing cell, time and height above ground, with the
                     pilot's official status (goal, ess, lo)
 
+Heights above ground are calibrated per flight on its landing (the last 30 s are on the ground),
+which removes each logger's altitude error, such as the geoid height when it records height above
+the WGS84 ellipsoid.
+
 Copies of another file's flight (same_flight_as) are left out. Each task is cached in
 DB/_crossing_parts (in batches), so a second run only does what is missing.
 
@@ -43,6 +47,8 @@ MIN_WIND_TURNS = 2        # a thermal needs this many turns for its drift to mea
 MAX_RISE_S = 1800         # tracing a thermal back: at most this long from the ground to its base
 MIN_WIND_S = 60           # ...and at least this long
 MAX_WIND_MS = 30          # a drift faster than this is a GPS or logging error, not wind
+MAX_OFFSET_M = 150        # largest altitude error corrected from the landing (geoid, barometric drift)
+LANDING_FIXES = 6         # the last fixes of a flight (30 s at 5 s) measure that error
 
 
 def safe(task_key):
@@ -71,6 +77,13 @@ def analyse_task(job):
         if g is None or not len(g):
             continue
         g = g.sort_values("t")
+        # Calibrate the height above ground on the landing: a flight ends on the ground, so the
+        # height there is the logger's altitude error (many record height above the WGS84
+        # ellipsoid rather than sea level: tens of metres, depending on the region)
+        raw = g["agl"].to_numpy()
+        landing_agl = float(np.nanmedian(raw[-LANDING_FIXES:])) if np.isfinite(raw[-LANDING_FIXES:]).any() else np.nan
+        offset = landing_agl if np.isfinite(landing_agl) and abs(landing_agl) <= MAX_OFFSET_M else 0.0
+        g = g.assign(agl=raw - offset)
         agl = g["agl"].to_numpy()
         known = np.isfinite(agl)
         near = float((agl[known] < NEAR_GROUND_M).mean()) if known.any() else np.nan
@@ -80,6 +93,7 @@ def analyse_task(job):
             "agl_median": float(np.nanmedian(agl)) if known.any() else np.nan,
             "agl_p10": float(np.nanpercentile(agl, 10)) if known.any() else np.nan,
             "near_ground_share": near, "is_drive": is_drive, "dem_coverage": float(known.mean()),
+            "agl_offset": offset, "landing_agl_raw": landing_agl,
         })
 
         # landing
@@ -88,6 +102,7 @@ def analyse_task(job):
             "track_id": f.track_id, "task_key": task_key, "result_id": f.result_id,
             "t": int(last["t"]), "lat": float(last["lat"]), "lon": float(last["lon"]),
             "cell_id": int(last["cell_id"]), "agl": float(last["agl"]) if np.isfinite(last["agl"]) else np.nan,
+            "agl_raw": landing_agl,
             "is_drive": is_drive,
         })
         if is_drive:
@@ -125,8 +140,8 @@ def analyse_task(job):
             row = {"track_id": f.track_id, "task_key": task_key, "seq": int(c.seq), "t_start": int(c.t_start),
                    "t_end": int(c.t_end), "lat": float(c.lat), "lon": float(c.lon), "cell_id": int(grid.cell_id(c.lat, c.lon)),
                    "alt_base": float(c.alt_base), "alt_top": float(c.alt_top),
-                   "agl_base": float(c.alt_base - ground_base) if np.isfinite(ground_base) else np.nan,
-                   "agl_top": float(c.alt_top - seg["ground"].iloc[-1]) if np.isfinite(seg["ground"].iloc[-1]) else np.nan,
+                   "agl_base": float(c.alt_base - ground_base - offset) if np.isfinite(ground_base) else np.nan,
+                   "agl_top": float(c.alt_top - seg["ground"].iloc[-1] - offset) if np.isfinite(seg["ground"].iloc[-1]) else np.nan,
                    "rate_ms": float(c.rate_ms), "turns": float(c.turns),
                    "wind_u": np.nan, "wind_v": np.nan, "wind_alt": np.nan,
                    "trigger_lat": np.nan, "trigger_lon": np.nan, "trigger_cell": None}
@@ -255,7 +270,13 @@ def main():
               f"(median); wind measured in {th['wind_u'].notna().mean():.0%} of them, "
               f"median {np.hypot(th['wind_u'], th['wind_v']).median():.1f} m/s")
     if len(land):
-        print(f"Landings: median {land.loc[~land['is_drive'], 'agl'].median():.0f} m above ground (should be close to 0)")
+        fl = ~land["is_drive"]
+        print(f"Landings: median {land.loc[fl, 'agl_raw'].median():.0f} m above ground before calibration, "
+              f"{land.loc[fl, 'agl'].median():.0f} m after")
+        print(f"Altitude calibration: {(checks['agl_offset'] != 0).mean():.0%} of flights; offset median "
+              f"{checks.loc[checks['agl_offset'] != 0, 'agl_offset'].median():.0f} m, "
+              f"10-90% {checks.loc[checks['agl_offset'] != 0, 'agl_offset'].quantile(0.1):.0f} to "
+              f"{checks.loc[checks['agl_offset'] != 0, 'agl_offset'].quantile(0.9):.0f} m")
 
 
 if __name__ == "__main__":
