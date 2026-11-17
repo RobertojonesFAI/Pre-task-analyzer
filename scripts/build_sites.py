@@ -40,6 +40,7 @@ POINTS_PCT = 1           # flight points outside the 1st-99th percentiles are ig
 MAX_SPAN_DEG = 4.0       # an area larger than this is cut down to its flight points, or to LAUNCH_BOX_DEG around the launch
 LAUNCH_BOX_DEG = 0.5     # (half-width; the flown chips are added anyway)
 MIN_CHIP_FIXES = 12      # a chip crossed for less than a minute in all (12 fixes of 5 s) is not added
+MAX_FLOWN_KM = 300       # ...nor one farther than this from the competition's launch (GPS errors, 0,0 fixes)
 LAUNCH_KM = 20           # competitions launching this close to a site's main launch belong to it
 KM_PER_DEG = 111.32
 
@@ -142,6 +143,7 @@ def flown_chips(db, threads=16):
         if ev is None:
             return None
         fx = pd.read_parquet(path, columns=["track_id", "lat", "lon"])
+        fx = fx[(fx["lat"] != 0) | (fx["lon"] != 0)]  # loggers without a GPS fix write 0,0
         if not len(fx):
             return None
         fx["chip_id"] = grid.chip_id(fx["lat"].to_numpy(), fx["lon"].to_numpy())
@@ -193,7 +195,18 @@ def main():
         n_flights = flights[ok]["task_key"].map(tasks.set_index("task_key")["event_key"]).value_counts().to_dict()
 
     flown = flown_chips(args.db)
-    kept = flown[flown["n_fixes"] >= MIN_CHIP_FIXES]
+    kept = flown[flown["n_fixes"] >= MIN_CHIP_FIXES].copy()
+    if len(kept):  # chips far from the competition's launch are GPS errors, not flying
+        clat, clon = grid.chip_centre(kept["chip_id"].to_numpy())
+        lau = kept["event_key"].map(launch)
+        ok = lau.notna()
+        dist = np.full(len(kept), np.inf)
+        dist[ok.to_numpy()] = [km((a, b), l) for a, b, l in zip(clat[ok.to_numpy()], clon[ok.to_numpy()], lau[ok])]
+        far = dist > MAX_FLOWN_KM
+        if far.any():
+            print(f"  {int(far.sum())} flown chips farther than {MAX_FLOWN_KM} km from their competition's launch left out "
+                  f"({int(kept.loc[far, 'n_fixes'].sum()):,} fixes)", flush=True)
+        kept = kept[~far]
     flown_by_event = {k: g for k, g in kept.groupby("event_key")}
     no_site = set(flown["event_key"]) - set(boxes)
 

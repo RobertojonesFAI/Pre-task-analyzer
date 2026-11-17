@@ -58,9 +58,11 @@ def chip_bounds(chip):
 
 
 def chip_centre(chip):
-    """The ERA5 grid point of a chip (latitude, longitude)."""
-    s, n, w, e = chip_bounds(chip)
-    return (s + n) / 2, (w + e) / 2
+    """The ERA5 grid point of a chip (latitude, longitude); chip can be an array."""
+    chip = np.asarray(chip, np.int64)
+    row, col = chip // CHIP_COLS, chip % CHIP_COLS
+    lat, lon = LAT0 + (row + 0.5) * CHIP_DEG, LON0 + (col + 0.5) * CHIP_DEG
+    return (float(lat), float(lon)) if lat.ndim == 0 else (lat, lon)
 
 
 def chips_in_box(south, north, west, east):
