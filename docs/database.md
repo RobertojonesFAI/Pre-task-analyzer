@@ -211,6 +211,8 @@ Hourly ERA5 and ERA5-Land in `database/weather/`, for every site on its competit
 
 Pressure levels from ARCO-ERA5 (notebook 07c) are read every 3rd UTC hour (those from the CDS are hourly) and add `q_<hPa>`, specific humidity in g/kg; ARCO does not store relative humidity, so `rh_<hPa>` is computed from it and the temperature with ERA5's own saturation formula (over water above 0 °C, over ice below −23 °C, mixed in between).
 
+ERA5-Land can also come from Google Earth Engine (`scripts/era5_land_gee.py`, notebook 07e), saved by month in `weather/gee/land/` (hours 5 to 21 local solar time, fluxes already hourly) and merged with the CDS files into `era5_land`.
+
 **`era5_land`**: one row per ERA5-Land point (0.1°, `lat`, `lon`, with its `chip_id`) and hour: `sensible_heat_wm2`, `sunshine_wm2` (hourly, from ERA5-Land's daily accumulations), `skin_temp_c`, `soil_moisture` (top layer, m³/m³), `albedo`, `snow_cover` (0–1).
 
 ## flight_checks, crossings, thermals, landings

@@ -311,7 +311,8 @@ def convert(weather, wanted_chips, tables=TABLES):
     for dataset in tables:
         files = sorted((weather / "raw" / dataset).glob("*.nc"))
         arco = sorted((weather / "arco" / dataset).glob("*.parquet"))  # from era5_arco.py
-        if not files and not arco:
+        gee = sorted((weather / "gee" / dataset).glob("*.parquet"))    # from era5_land_gee.py (ERA5-Land)
+        if not files and not arco and not gee:
             continue
         frames = []
         for path in files:
@@ -323,9 +324,14 @@ def convert(weather, wanted_chips, tables=TABLES):
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["time", "latitude", "longitude"])
         df = df.drop_duplicates(["time", "latitude", "longitude"], keep="last")
         if dataset == "land":
-            df = _deaccumulate_land(df)
-            df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
-            df["chip_id"] = grid.chip_id(df["lat"].to_numpy(), df["lon"].to_numpy())
+            if frames:
+                df = _deaccumulate_land(df)
+                df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
+                df["chip_id"] = grid.chip_id(df["lat"].to_numpy(), df["lon"].to_numpy())
+            if gee:  # the same table read from Earth Engine (hourly already); together they cover every hour
+                df = pd.concat(([df] if frames else []) + [pd.read_parquet(p) for p in gee], ignore_index=True)
+                df["lat"], df["lon"] = df["lat"].astype(float).round(1), df["lon"].astype(float).round(1)
+                df = df.drop_duplicates(["lat", "lon", "time"], keep="last")
             df = df[df["chip_id"].isin(wanted_chips)]
         else:
             df["chip_id"] = grid.chip_id(df["latitude"].round(2).to_numpy(), df["longitude"].round(2).to_numpy())
