@@ -115,7 +115,7 @@ def fetch(ee, req, bands, retries=5):
             time.sleep(10 * (attempt + 1) + np.random.uniform(0, 5))
     head, body = rows[0], rows[1:]
     if not body:
-        return pd.DataFrame()
+        return None   # no images for these hours: Earth Engine does not have them yet
     df = pd.DataFrame(body, columns=head)
     out = pd.DataFrame({"time": pd.to_datetime(df["time"], unit="ms"),
                         "lat": df["latitude"].astype(float).round(1), "lon": df["longitude"].astype(float).round(1)})
@@ -129,6 +129,25 @@ def fetch(ee, req, bands, retries=5):
         out[col] = x.astype("float32")
     out["chip_id"] = grid.chip_id(out["lat"].to_numpy(), out["lon"].to_numpy())
     return out.dropna(subset=[BANDS[b][0] for b in bands], how="all")   # sea points have no land data
+
+
+def really_done(out, month, reqs):
+    """Site-days listed as done whose rows are in the month's file (a first version marked days
+    Earth Engine did not have yet as done, with no rows)."""
+    done_file, path = out / f"{month}.done.json", out / f"{month}.parquet"
+    listed = set(json.loads(done_file.read_text())) if done_file.exists() else set()
+    if not listed or not path.exists():
+        return set()
+    d = pd.read_parquet(path, columns=["lat", "lon", "time"])
+    have = set(zip(d["lat"].round(1), d["lon"].round(1), d["time"].dt.floor("h")))
+    ok = set()
+    for r in reqs:
+        if r["key"] not in listed:
+            continue
+        mid = (r["start"] + (r["end"] - r["start"]) / 2).floor("h")
+        if any((la, lo, mid) in have for la, lo in r["points"]):
+            ok.add(r["key"])
+    return ok
 
 
 def main():
@@ -150,8 +169,7 @@ def main():
         by_month.setdefault(r["month"], []).append(r)
     todo = {}
     for m, rs in by_month.items():
-        done_file = out / f"{m}.done.json"
-        done = set(json.loads(done_file.read_text())) if done_file.exists() else set()
+        done = really_done(out, m, rs)
         left = [r for r in rs if r["key"] not in done]
         if left:
             todo[m] = left
@@ -168,7 +186,7 @@ def main():
     missing = [b for b in BANDS if b not in have]
     if missing:
         print(f"  not in {COLLECTION}, left out: {', '.join(missing)}", flush=True)
-    started, done_n, failed = time.time(), 0, 0
+    started, done_n, seen, failed, empty = time.time(), 0, 0, 0, 0
     for m in sorted(todo):
         t0 = time.time()
         frames, ok_keys = [], []
@@ -177,7 +195,11 @@ def main():
             for f in as_completed(futs):
                 r = futs[f]
                 try:
-                    frames.append(f.result())
+                    got = f.result()
+                    if got is None:
+                        empty += 1
+                        continue
+                    frames.append(got)
                     ok_keys.append(r["key"])
                 except Exception as e:  # noqa: BLE001
                     failed += 1
@@ -194,11 +216,15 @@ def main():
         prev = set(json.loads(done_file.read_text())) if done_file.exists() else set()
         done_file.write_text(json.dumps(sorted(prev | set(ok_keys))))
         done_n += len(ok_keys)
-        rate = done_n / max(time.time() - started, 1e-9)
-        print(f"... {m}: {len(ok_keys)}/{len(todo[m])} site-days, {time.time() - t0:.0f} s | {done_n:,}/{n:,}, "
-              f"about {(n - done_n) / max(rate, 1e-9) / 3600:.1f} h left" + (f", {failed} failed" if failed else ""), flush=True)
+        seen += len(todo[m])
+        rate = seen / max(time.time() - started, 1e-9)
+        print(f"... {m}: {len(ok_keys)}/{len(todo[m])} site-days, {time.time() - t0:.0f} s | {seen:,}/{n:,}, "
+              f"about {(n - seen) / max(rate, 1e-9) / 3600:.1f} h left" + (f", {failed} failed" if failed else "")
+              + (f", {empty} not in Earth Engine yet" if empty else ""), flush=True)
     print(f"Done in {(time.time() - started) / 3600:.1f} h"
           + (f"; {failed} site-days failed, run again to retry them" if failed else "")
+          + (f"; {empty} site-days are after Earth Engine's last date: notebook 07 (CDS, --datasets land) "
+             f"can get those" if empty else "")
           + ". Run era5.py --convert-only --tables land to build era5_land.parquet.", flush=True)
 
 
