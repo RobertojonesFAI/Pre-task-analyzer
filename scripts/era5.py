@@ -349,6 +349,26 @@ def convert(weather, wanted_chips, tables=TABLES):
               f"{df['time'].dt.normalize().nunique():,} days", flush=True)
 
 
+_GEE_DONE, _DAYS = {}, {}
+
+
+def read_by_gee(db, weather, job):
+    """Every site-day of an ERA5-Land request already read from Earth Engine (era5_land_gee.py)?"""
+    import json
+
+    month = f"{job['year']}-{job['month']:02d}"
+    if month not in _GEE_DONE:
+        f = weather / "gee" / "land" / f"{month}.done.json"
+        _GEE_DONE[month] = set(json.loads(f.read_text())) if f.exists() else set()
+    if not _GEE_DONE[month]:
+        return False
+    if not _DAYS:
+        _DAYS.update(site_days(db))
+    keys = {f"{s}|{d:%Y-%m-%d}" for s in job["sites"] for d in _DAYS.get(s, ())
+            if d.year == job["year"] and d.month == job["month"]}
+    return bool(keys) and keys <= _GEE_DONE[month]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("db", type=Path, help="database folder (with sites from build_sites.py)")
@@ -368,6 +388,10 @@ def main():
     note_old_files(args.db, weather)
     jobs = plan(args.db, args.box, datasets)
     todo = [j for j in jobs if not have(weather, j)]
+    from_gee = [j for j in todo if j["dataset"] == "land" and read_by_gee(args.db, weather, j)]
+    todo = [j for j in todo if j not in from_gee]
+    if from_gee:
+        print(f"ERA5-Land: {len(from_gee):,} requests already read from Earth Engine (notebook 07e)", flush=True)
     months = len({(j["year"], j["month"]) for j in jobs})
     print(f"ERA5: {len(jobs) // len(datasets):,} regional requests in {months} months × {len(datasets)} datasets; "
           f"{len(jobs) - len(todo):,} files already here, {len(todo):,} to ask for", flush=True)
