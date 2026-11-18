@@ -167,9 +167,9 @@ def main():
     by_month = {}
     for r in reqs:
         by_month.setdefault(r["month"], []).append(r)
-    todo = {}
+    todo, valid = {}, {}
     for m, rs in by_month.items():
-        done = really_done(out, m, rs)
+        done = valid[m] = really_done(out, m, rs)
         left = [r for r in rs if r["key"] not in done]
         if left:
             todo[m] = left
@@ -212,9 +212,7 @@ def main():
             tmp = path.with_suffix(".part")
             df.to_parquet(tmp, index=False)
             tmp.replace(path)
-        done_file = out / f"{m}.done.json"
-        prev = set(json.loads(done_file.read_text())) if done_file.exists() else set()
-        done_file.write_text(json.dumps(sorted(prev | set(ok_keys))))
+        (out / f"{m}.done.json").write_text(json.dumps(sorted(valid.get(m, set()) | set(ok_keys))))
         done_n += len(ok_keys)
         seen += len(todo[m])
         rate = seen / max(time.time() - started, 1e-9)
