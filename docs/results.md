@@ -97,6 +97,8 @@ The chance that a pilot crossing a 1 km cell finds a climb (30 s or more climbin
 - The climb rate when there is a climb is hard to predict per crossing: R² 0.095, mean error 0.55 m/s (mean 1.65 m/s, 810,296 climbs).
 - Most used: height on arrival (25.8%), topographic position at 5 and 20 km (17%), height as a share of the usable boundary layer (6.4%), relief, solar hour, ridges, albedo, soil moisture.
 
+![Calibration on sites left out, and the features the model uses most](../results/thermal_v0_calibration_importance.png)
+
 Reading: per crossing, whether a pilot climbs depends as much on the pilot (how low they are, whether they need a climb, whether others are already circling) as on the air, so the gains from each group are small even though each is real. The weather sets the *day* (the ceiling result above), the terrain sets *where*. Next version: a label that removes the pilot's choice (crossings low enough to be searching; cells by day rather than by crossing), gaggles as a feature, ERA5-Land at 0.1°, and day-level models of ceiling and climb rate.
 
 Web data: 34,692 cells with 20+ crossings at 247 sites (1.2 MB).
