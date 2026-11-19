@@ -11,7 +11,10 @@ key gets a class:
     curated    otherwise, a short list of well-known competition families (below)
     unknown    otherwise
 
-Writes DB/result_gliders.parquet (result_id, glider_key, glider_class, class_source) and
+The harness, when a pilot writes it after the wing ("Ozone Enzo 3 / Ozone Submarine"), is kept as
+its own key: a pod's drag matters at competition speeds.
+
+Writes DB/result_gliders.parquet (result_id, glider_key, glider_class, class_source, harness_key) and
 DB/gliders.parquet (one row per key: example name, results, class, how it was found).
 
     python3 scripts/gliders.py /content/drive/MyDrive/IGCS/database
@@ -24,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-BRANDS = ["ozone", "gin", "gingliders", "advance", "niviuk", "flow", "flowparagliders", "axis", "macpara", "mac para",
+BRANDS = ["woody valley", "kortel", "karpofly", "ozone", "gin", "gingliders", "advance", "niviuk", "flow", "flowparagliders", "axis", "macpara", "mac para",
           "skywalk", "triple seven", "777", "nova", "swing", "phi", "bgd", "dudek", "up", "u-turn", "uturn", "sol",
           "airdesign", "air design", "supair", "aircross", "icaro", "skyman", "ozone paragliders", "gradient",
           "porcher", "windtech", "independence", "firebird", "apco", "freex", "paratech", "papillon"]
@@ -41,12 +44,16 @@ TYPOS = {"iceapeak": "icepeak", "boomarang": "boomerang", "boomerag": "boomerang
 ALIASES = {"icepeakxone": "xone", "xone": "xone"}   # the same wing under two names
 
 
-def key(name):
-    """'OZONE Enzo 3 MS' -> 'enzo3'."""
+def _parts(name):
+    """'Ozone Enzo 3 / Ozone Submarine' -> ['ozone enzo 3', 'ozone submarine']: wing first, then the
+    harness when the pilot wrote one."""
     if not isinstance(name, str) or not name.strip():
-        return ""
-    parts = [p for p in re.split(r"\s*/\s*|\s+\+\s+|\s+&\s+", name.lower().strip()) if p.strip()]
-    s = parts[0] if parts else ""   # "wing / harness": the wing comes first
+        return []
+    return [p for p in re.split(r"\s*/\s*|\s+\+\s+|\s+&\s+", name.lower().strip()) if p.strip()]
+
+
+def _norm(s):
+    """One model name -> key: no brand, no size, no spaces, common typos fixed."""
     for wrong, right in TYPOS.items():
         s = s.replace(wrong, right)
     s = s.replace("x-alps", "xalps").replace("x alps", "xalps").replace("x-one", "xone").replace("x one", "xone")
@@ -59,6 +66,19 @@ def key(name):
         words.pop()   # a trailing size ("MS") or area ("22.5") after the model number
     k = "".join(words)
     return ALIASES.get(k, k)
+
+
+def key(name):
+    """The wing: 'OZONE Enzo 3 MS / Ozone Submarine' -> 'enzo3'."""
+    p = _parts(name)
+    return _norm(p[0]) if p else ""
+
+
+def harness_key(name):
+    """The harness when written after the wing: 'Ozone Enzo 3 / Ozone Submarine' -> 'submarine'
+    (a pod's drag matters at competition speeds); '' when there is none."""
+    p = _parts(name)
+    return _norm(p[1]) if len(p) > 1 else ""
 
 
 def family(k):
@@ -84,6 +104,7 @@ def cert(c):
 def classify(results):
     r = results[["result_id", "glider", "glider_cert"]].copy()
     r["glider_key"] = r["glider"].map(key)
+    r["harness_key"] = r["glider"].map(harness_key)
     r["declared"] = r["glider_cert"].map(cert)
     votes = r.dropna(subset=["declared"]).query("glider_key != ''")
     major = votes.groupby("glider_key")["declared"].agg(lambda x: x.value_counts().index[0])
@@ -91,7 +112,7 @@ def classify(results):
     curated = r["glider_key"].map(lambda k: CURATED.get(family(k)) or CURATED.get(k))
     r["glider_class"] = declared.where(declared.notna(), curated)
     r["class_source"] = np.where(declared.notna(), "declared", np.where(curated.notna(), "curated", "unknown"))
-    return r[["result_id", "glider_key", "glider_class", "class_source"]], r
+    return r[["result_id", "glider_key", "glider_class", "class_source", "harness_key"]], r
 
 
 def main():
@@ -111,6 +132,9 @@ def main():
           f"normalising {r.loc[named, 'glider'].nunique():,} spellings")
     print("class found:", r["class_source"].value_counts(normalize=True).map("{:.1%}".format).to_dict())
     print("classes:", r["glider_class"].value_counts(normalize=True).map("{:.1%}".format).to_dict())
+    h = r[r["harness_key"] != ""]
+    print(f"harness written after the wing in {len(h) / len(r):.1%} of results ({h['harness_key'].nunique():,} models); "
+          f"most common: " + ", ".join(f"{k} {n:,}" for k, n in h["harness_key"].value_counts().head(8).items()))
     print("\nMost flown models:\n" + g.head(20)[["example", "glider_key", "results", "glider_class", "class_source"]]
           .to_string(index=False))
 
