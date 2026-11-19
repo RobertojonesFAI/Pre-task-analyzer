@@ -259,7 +259,8 @@ export function mountPlanner(box: HTMLElement, c: PlanContext) {
   ctx = { ...c, days: [...c.days].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)) };
   utc = Math.round(c.site.lon / 15);
   box.hidden = false;
-  setDay(ctx.days[0] ?? null);
+  // the latest day whose task is on record, so "That day's task" has something to show
+  setDay(ctx.days.find((d) => (d.route?.length ?? 0) >= 2) ?? ctx.days[0] ?? null);
   expand();
 }
 

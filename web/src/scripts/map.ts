@@ -2,6 +2,7 @@ import * as maplibregl from "maplibre-gl";
 // the map's web worker is its own file: let the bundler copy it and tell MapLibre where it is
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import { attachMap, closePlanner } from "./planner";
+import { addRelief } from "./terrain";
 import { loadTaskModel, modelSummary, onTaskSelect, renderTasks } from "./tasks";
 
 maplibregl.setWorkerUrl(workerUrl);
@@ -16,7 +17,8 @@ type Summary = {
   model?: Record<string, { auc?: number; log_loss_skill?: number }>;
   climb_rate?: { r2?: number; mae_ms?: number };
 };
-type Layer = "climb_pct" | "predicted_pct";
+type Layer = "thermals" | "climb_pct" | "predicted_pct";
+type Hotspots = { cols: string[]; rows: (number | null)[][] };
 
 const STYLE = "https://tiles.openfreemap.org/styles/positron";
 const FALLBACK: maplibregl.StyleSpecification = {
@@ -29,7 +31,8 @@ const RAMP: [number, string][] = [
   [50, "#eb6834"], [62.5, "#cf5222"], [75, "#a33e16"],
 ];
 const HINT: Record<Layer, string> = {
-  climb_pct: "Share of pilots who found a climb when they crossed the cell.",
+  thermals: "Where pilots circled in thermals: cells of about 200 m with thermals from at least two flights. Zoom in for each cell's climb rate and height.",
+  climb_pct: "Share of pilots who found a climb when they crossed the 1 km cell.",
   predicted_pct: "What the thermal model predicts for those same crossings, scored on sites it never saw.",
 };
 
@@ -37,7 +40,9 @@ const $ = (id: string) => document.getElementById(id)!;
 const fmt = new Intl.NumberFormat("en");
 
 let sites: Site[] = [];
-let layer: Layer = "climb_pct";
+let layer: Layer = "thermals";     // the layer shown
+let chosen: Layer = "thermals";    // the one the user picked (thermals fall back to cells where there are none)
+let hasHotspots = false;
 let current: Site | null = null;
 let allSites = () => {};
 
@@ -83,6 +88,24 @@ function cellsGeo(cols: string[], rows: (number | null)[][]): GeoJSON.FeatureCol
   };
 }
 
+/** Hotspot cells as points; `w` (0–1) is how many flights climbed there, on a log scale, relative to
+ * the site's busiest cells (95th percentile), so every site uses the whole colour scale. */
+function hotspotsGeo(h: Hotspots | null): GeoJSON.FeatureCollection {
+  if (!h) return { type: "FeatureCollection", features: [] };
+  const i = Object.fromEntries(h.cols.map((c, k) => [c, k]));
+  const flights = h.rows.map((r) => (r[i.flights] as number) || 0).sort((a, b) => a - b);
+  const top = Math.log1p(Math.max(3, flights[Math.floor(0.95 * (flights.length - 1))] ?? 3));
+  return {
+    type: "FeatureCollection",
+    features: h.rows.map((r) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [r[i.lon] as number, r[i.lat] as number] },
+      properties: { thermals: r[i.thermals], flights: r[i.flights], climb_ms: r[i.climb_ms], top: r[i.top_agl_m],
+        w: Math.min(1, Math.max(0.25, Math.log1p((r[i.flights] as number) || 0) / top)) },
+    })),
+  };
+}
+
 function renderList(map: maplibregl.Map, filter = "") {
   const q = filter.trim().toLowerCase();
   const ol = $("sites");
@@ -114,7 +137,19 @@ async function selectSite(map: maplibregl.Map, s: Site) {
   const facts: [string, string][] = [
     ["Competitions", String(s.events)], ["Flights", fmt.format(s.flights)], ["Cells shown", fmt.format(s.cells)],
   ];
-  const data = await json<{ cols: string[]; rows: (number | null)[][] }>(`/data/cells/${s.id}.json`);
+  const [data, hot] = await Promise.all([
+    json<{ cols: string[]; rows: (number | null)[][] }>(`/data/cells/${s.id}.json`),
+    json<Hotspots>(`/data/hotspots/${s.id}.json`),
+  ]);
+  if (current !== s) return;
+  hasHotspots = !!hot && hot.rows.length > 0;
+  (map.getSource("hotspots") as maplibregl.GeoJSONSource).setData(hotspotsGeo(hot));
+  setLayer(map, chosen === "thermals" && !hasHotspots ? "climb_pct" : chosen);
+  if (hasHotspots) {
+    const k = hot!.cols.indexOf("thermals");
+    facts.push(["Thermals mapped", fmt.format(hot!.rows.reduce((n, r) => n + ((r[k] as number) || 0), 0))]);
+    $("legend").hidden = false;
+  }
   const src = map.getSource("cells") as maplibregl.GeoJSONSource;
   if (data && data.rows.length) {
     src.setData(cellsGeo(data.cols, data.rows));
@@ -162,10 +197,17 @@ function backToAll(map: maplibregl.Map) {
   $("list-wrap").hidden = false;
   $("legend").hidden = true;
   (map.getSource("cells") as maplibregl.GeoJSONSource).setData({ type: "FeatureCollection", features: [] });
+  (map.getSource("hotspots") as maplibregl.GeoJSONSource).setData(hotspotsGeo(null));
   (map.getSource("route") as maplibregl.GeoJSONSource | undefined)?.setData(routeGeo(null));
   closePlanner();
   allSites();
 }
+
+const LEGEND: Record<Layer, [string, string[]]> = {
+  thermals: ["Thermals found", ["few", "", "", "many"]],
+  climb_pct: ["Found a climb", ["0%", "25%", "50%", "75%+"]],
+  predicted_pct: ["Model: chance of a climb", ["0%", "25%", "50%", "75%+"]],
+};
 
 function setLayer(map: maplibregl.Map, l: Layer) {
   layer = l;
@@ -174,9 +216,14 @@ function setLayer(map: maplibregl.Map, l: Layer) {
     b.classList.toggle("on", on);
     b.setAttribute("aria-checked", String(on));
   });
-  $("layer-hint").textContent = HINT[l];
-  $("legend-title").textContent = l === "climb_pct" ? "Found a climb" : "Model: chance of a climb";
-  if (map.getLayer("cells-fill")) map.setPaintProperty("cells-fill", "fill-color", colorExpr(l));
+  $("layer-hint").textContent = l === "thermals" && current && !hasHotspots ? "No thermal hotspots exported for this site yet." : HINT[l];
+  $("legend-title").textContent = LEGEND[l][0];
+  $("legend-scale").innerHTML = LEGEND[l][1].map((t) => `<span>${t}</span>`).join("");
+  const vis = (id: string, on: boolean) => map.getLayer(id) && map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+  vis("cells-fill", l !== "thermals");
+  vis("hot-heat", l === "thermals");
+  vis("hot-dot", l === "thermals");
+  if (l !== "thermals" && map.getLayer("cells-fill")) map.setPaintProperty("cells-fill", "fill-color", colorExpr(l));
 }
 
 function showTip(e: maplibregl.MapMouseEvent, html: string) {
@@ -210,7 +257,7 @@ export async function start() {
   // the basemap is optional: without it (offline, blocked) the data still shows on a plain background
   const style = await fetch(STYLE).then((r) => (r.ok ? STYLE : FALLBACK)).catch(() => FALLBACK);
   const map = new maplibregl.Map({ container: "map", style, center: [10, 25], zoom: 1.6, attributionControl: { compact: true } });
-  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+  map.addControl(new maplibregl.NavigationControl({ showCompass: true, visualizePitch: true }), "top-right");
 
   const fitAll = (duration: number) => {
     if (!sites.length) return;
@@ -222,9 +269,30 @@ export async function start() {
 
   map.on("load", () => {
     if (!location.hash) fitAll(0);
+    addRelief(map);
     map.addSource("cells", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     map.addLayer({ id: "cells-fill", type: "fill", source: "cells",
-      paint: { "fill-color": colorExpr(layer), "fill-opacity": 0.78 } });
+      paint: { "fill-color": colorExpr("climb_pct"), "fill-opacity": 0.72 } });
+    // thermal hotspots: a heat map whose blur follows the cells' spacing (about 220 m), so it reads as
+    // a smooth raster at every zoom; invisible dots on top answer the pointer with each cell's numbers
+    map.addSource("hotspots", { type: "geojson", data: hotspotsGeo(null) });
+    map.addLayer({ id: "hot-heat", type: "heatmap", source: "hotspots",
+      paint: {
+        "heatmap-weight": ["get", "w"],
+        "heatmap-intensity": 0.9,
+        "heatmap-radius": ["interpolate", ["exponential", 2], ["zoom"], 8, 1, 16, 256],
+        "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
+          0, "rgba(251,211,189,0)", 0.05, "rgba(251,211,189,0.6)", 0.15, "rgba(246,169,130,0.85)", 0.3, "#f08455",
+          0.5, "#eb6834", 0.7, "#cf5222", 0.9, "#a33e16", 1, "#7f2f10"],
+        "heatmap-opacity": 0.85,
+      } });
+    map.addLayer({ id: "hot-dot", type: "circle", source: "hotspots", minzoom: 12,
+      paint: {
+        "circle-radius": ["interpolate", ["exponential", 2], ["zoom"], 12, 3, 16, 48],
+        "circle-color": "#a33e16",
+        "circle-opacity": 0.01,
+      } });
+    setLayer(map, layer);
     map.addSource("route", { type: "geojson", data: routeGeo(null) });
     map.addLayer({ id: "route-cyl", type: "line", source: "route", filter: ["==", ["get", "kind"], "cyl"],
       paint: { "line-color": "#1d4f99", "line-width": 1.5, "line-dasharray": [2, 1] } });
@@ -256,6 +324,14 @@ export async function start() {
         `<br>Model <b>${pct(p.predicted_pct)}</b>` + (p.climb_ms != null ? `<br>Mean climb <b>${(p.climb_ms as number).toFixed(1)} m/s</b>` : ""));
     });
     map.on("mouseleave", "cells-fill", () => ($("tip").hidden = true));
+    map.on("mousemove", "hot-dot", (e) => {
+      const p = e.features?.[0]?.properties as Record<string, number | null> | undefined;
+      if (!p) return;
+      showTip(e, `<b>${fmt.format(p.thermals as number)}</b> thermals from <b>${fmt.format(p.flights as number)}</b> flights` +
+        (p.climb_ms != null ? `<br>Mean climb <b>${(p.climb_ms as number).toFixed(1)} m/s</b>` : "") +
+        (p.top != null ? `<br>Top <b>${fmt.format(p.top as number)} m</b> above the ground` : ""));
+    });
+    map.on("mouseleave", "hot-dot", () => ($("tip").hidden = true));
     map.on("mousemove", "sites-dot", (e) => {
       map.getCanvas().style.cursor = "pointer";
       const p = e.features?.[0]?.properties as Record<string, string | number>;
@@ -273,7 +349,7 @@ export async function start() {
   ($("search") as HTMLInputElement).addEventListener("input", (e) => renderList(map, (e.target as HTMLInputElement).value));
   $("back").addEventListener("click", () => backToAll(map));
   document.querySelectorAll<HTMLButtonElement>(".seg button").forEach((b) =>
-    b.addEventListener("click", () => setLayer(map, b.dataset.layer as Layer)));
+    b.addEventListener("click", () => { chosen = b.dataset.layer as Layer; setLayer(map, chosen); }));
   const hash = location.hash.slice(1);
   if (hash) map.once("load", () => { const s = sites.find((x) => x.id === hash); if (s) selectSite(map, s); });
 }

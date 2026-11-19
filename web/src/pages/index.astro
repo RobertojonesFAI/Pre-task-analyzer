@@ -26,11 +26,12 @@ import "../styles/global.css";
       </section>
 
       <section class="layer" aria-label="Map layer">
-        <div class="seg" role="radiogroup">
-          <button role="radio" aria-checked="true" data-layer="climb_pct" class="on">Observed</button>
+        <div class="seg" role="radiogroup" aria-label="Map layer">
+          <button role="radio" aria-checked="true" data-layer="thermals" class="on">Thermals</button>
+          <button role="radio" aria-checked="false" data-layer="climb_pct">Climb %</button>
           <button role="radio" aria-checked="false" data-layer="predicted_pct">Model</button>
         </div>
-        <p class="hint" id="layer-hint">Share of pilots who found a climb when they crossed the cell.</p>
+        <p class="hint" id="layer-hint">Where pilots circled in thermals: cells of about 200 m with thermals from at least two flights. Zoom in for each cell's climb rate and height.</p>
       </section>
 
       <section class="site" id="site" hidden>
@@ -56,9 +57,9 @@ import "../styles/global.css";
     <main class="map-wrap">
       <div id="map" aria-label="Map of sites and thermal cells"></div>
       <div class="legend" id="legend" hidden>
-        <div class="legend-title" id="legend-title">Found a climb</div>
+        <div class="legend-title" id="legend-title">Thermals found</div>
         <div class="legend-bar"></div>
-        <div class="legend-scale"><span>0%</span><span>25%</span><span>50%</span><span>75%+</span></div>
+        <div class="legend-scale" id="legend-scale"><span>few</span><span></span><span></span><span>many</span></div>
       </div>
       <div class="tip" id="tip" hidden></div>
       <p class="empty" id="empty" hidden>No data yet: run <code>scripts/export_web.py</code> into <code>web/public/data</code>.</p>
