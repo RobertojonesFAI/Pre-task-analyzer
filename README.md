@@ -77,17 +77,15 @@ The tracks are too big for git. They live in the project's Google Drive folder.
 
 ## Next steps
 
-In order of priority for the end of the semester (December 2026):
+Done so far: the database (01–08), the weather (07, 07b–07e), the thermal model v0 (09), gliders, ratings and the task baseline (10), the wind check (11), the task model with weather (13), the web demo and the API. Step by step from here:
 
-1. **Weather base (07, done):** ERA5 and ERA5-Land for every site, hourly, on the days of each competition (ARCO-ERA5 for single and pressure levels, Google Earth Engine or the Copernicus Climate Data Store for ERA5-Land).
-2. **Energy on the slopes:** sunlight on each cell's slopes with shading by neighbouring mountains, clouds, albedo and land cover, and the trigger point of each thermal traced back upwind.
-   **Wind over the terrain (2b):** WindNinja (US Forest Service) run per site for a table of inflow directions and speeds, giving terrain-scale wind (speed-up over ridges, channelling in valleys, lee sides) for every hour by interpolating with the ERA5 wind.
-3. **Validation against the pilots:** weather sources compared with the ceilings of the real thermals and with radiosonde soundings (IGRA2); terrain winds compared with the wind pilots measured (the drift of their circles in thermals).
-4. **HRRR** as a regional layer for the United States.
-5. **CERRA** as a regional layer for Europe.
+1. **Live tasks with forecasts:** design a task for a coming day with forecast models (GFS, ECMWF, HRRR) in place of ERA5, from the competition's waypoints, cylinders, start and goal; then the likely route over the predicted thermals and alternative tasks that land in the committee's target.
+2. **Task model v2:** the weather hour by hour along the route rather than averaged over the task window; each pilot's result (goal, time) from rating, glider and harness, added up into the goal share; the thermal model's predictions along the legs.
+3. **Thermal model v1:** a label without the pilot's choice (searching crossings; cells by day), gaggles, ERA5-Land at 0.1°, day-level models of ceiling and climb rate.
+4. **Energy on the slopes and wind over the terrain:** sunlight with shading by neighbouring mountains, clouds, albedo and land cover; trigger points traced upwind; WindNinja per site, and the CFD surrogate (OpenFOAM, the user's own) kept if it beats WindNinja against the winds pilots measured (notebook 11 gives the bar: 63% within 30° near the ground).
+5. **Regional weather layers:** HRRR (United States), CERRA (Europe); radiosonde soundings (IGRA2) for validation.
+6. **Web:** a 3D terrain view of each site (as in ParaglidingMeteograms), finer cells on the map, and the analyzer inside xcmeteo.com with sign-in.
 
-The web page (`web/`, Astro + MapLibre on Cloudflare Pages) maps the sites and, per site, how often pilots found a climb in each cell and what the thermal model predicts; see [web/README.md](web/README.md).
+The web page (`web/`, Astro + MapLibre on Cloudflare Pages) maps the sites and, per site, how often pilots found a climb in each cell and what the thermal model predicts, and the site's tasks with the task model's predictions; see [web/README.md](web/README.md).
 
-Extension: a CFD surrogate trained on OpenFOAM simulations of competition terrain (wind at flight heights, which WindNinja does not give), kept if it beats WindNinja against the winds pilots measured.
-
-Then the cell crossings and labels, the general thermal and landout model, the task model and the route planner (see [docs/model_design.md](docs/model_design.md)).
+The models are described in [docs/model_design.md](docs/model_design.md).
