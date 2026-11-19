@@ -1,7 +1,8 @@
 import * as maplibregl from "maplibre-gl";
 // the map's web worker is its own file: let the bundler copy it and tell MapLibre where it is
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
-import { loadTaskModel, modelSummary, onTaskSelect, renderTasks, setMapHooks } from "./tasks";
+import { attachMap, closePlanner } from "./planner";
+import { loadTaskModel, modelSummary, onTaskSelect, renderTasks } from "./tasks";
 
 maplibregl.setWorkerUrl(workerUrl);
 
@@ -126,7 +127,7 @@ async function selectSite(map: maplibregl.Map, s: Site) {
     src.setData({ type: "FeatureCollection", features: [] });
   }
   $("s-facts").innerHTML = facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
-  renderTasks(s.id, $("tasks-box"));
+  renderTasks(s, $("tasks-box"));
   map.fitBounds([[s.box[0], s.box[1]], [s.box[2], s.box[3]]], { padding: 40, duration: 900 });
 }
 
@@ -162,7 +163,7 @@ function backToAll(map: maplibregl.Map) {
   $("legend").hidden = true;
   (map.getSource("cells") as maplibregl.GeoJSONSource).setData({ type: "FeatureCollection", features: [] });
   (map.getSource("route") as maplibregl.GeoJSONSource | undefined)?.setData(routeGeo(null));
-  (map.getSource("draw") as maplibregl.GeoJSONSource | undefined)?.setData(routeGeo(null));
+  closePlanner();
   allSites();
 }
 
@@ -236,34 +237,8 @@ export async function start() {
         map.fitBounds([[Math.min(...lo), Math.min(...la)], [Math.max(...lo), Math.max(...la)]], { padding: 60, duration: 800 });
       }
     });
-    // a route the user draws for the API: clicks add turnpoints while drawing is on
-    map.addSource("draw", { type: "geojson", data: routeGeo(null) });
-    map.addLayer({ id: "draw-cyl", type: "line", source: "draw", filter: ["==", ["get", "kind"], "cyl"],
-      paint: { "line-color": "#cf5222", "line-width": 1.5, "line-dasharray": [2, 1] } });
-    map.addLayer({ id: "draw-line", type: "line", source: "draw", filter: ["==", ["get", "kind"], "line"],
-      paint: { "line-color": "#cf5222", "line-width": 3 } });
-    let drawing = false;
-    let drawPts: [number, number, number][] = [];
-    let drawChanged: (p: [number, number, number][]) => void = () => {};
-    const redraw = () => {
-      (map.getSource("draw") as maplibregl.GeoJSONSource).setData(
-        drawPts.length ? routeGeo(drawPts.map(([a, b, r]) => [a, b, r, ""])) : routeGeo(null));
-      drawChanged(drawPts.slice());
-    };
-    setMapHooks({
-      draw: (on, onChange) => {
-        drawing = on;
-        drawChanged = onChange;
-        map.getCanvas().style.cursor = on ? "crosshair" : "";
-      },
-      undo: () => { drawPts.pop(); redraw(); },
-      clear: () => { drawPts = []; redraw(); },
-    });
-    map.on("click", (e) => {
-      if (!drawing) return;
-      drawPts.push([+e.lngLat.lat.toFixed(5), +e.lngLat.lng.toFixed(5), 400]);
-      redraw();
-    });
+    // the task planner: its own layers, markers and clicks
+    attachMap(map);
     map.addSource("sites", { type: "geojson", data: sitesGeo(sites) });
     map.addLayer({ id: "sites-dot", type: "circle", source: "sites",
       paint: {

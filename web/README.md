@@ -4,7 +4,26 @@ A static site (Astro + MapLibre GL) with a map of the competition sites and, per
 
 - the 1 km cells pilots crossed, coloured by how often they found a climb there (observed) or by what the thermal model predicts; hovering a cell shows its crossings, both shares and the mean climb rate;
 - the site's past tasks: the route on the map, the weather along it, and the winner's time and goal share the task model predicted without having seen that competition, next to what happened;
-- "what if": change a task's distance or start time and see the prediction move. The task model runs in the browser (`task_model.json`, LightGBM trees as nested arrays), so the site needs no server.
+- "what if": change a task's distance or start time and see the prediction move. The task model runs in the browser (`task_model.json`, LightGBM trees as nested arrays), so the site needs no server;
+- the task planner (below).
+
+## Task planner
+
+In a task card, "Plan a task for this day" opens an editor for a competition task on that day:
+
+- turnpoints with a name, a type (takeoff, start of speed section, turnpoint, end of speed section, goal) and a cylinder radius; a start gate, a deadline and a goal cylinder or line. Start from the task as it was set, or click the map: on a waypoint the site's competitions used (the dots) or anywhere. Turnpoints can be dragged, reordered and inserted;
+- the optimized task and speed-section distances of FAI Sporting Code S7F §7.2, on the WGS84 ellipsoid (the shortest route from launch touching every cylinder in order, from three starting configurations). On the 22 reference tasks of [pyxctsk](https://github.com/simonsteiner/pyxctsk) it agrees with that library to within a metre;
+- import: XCTrack (`.xctsk` and QR codes, from an image or a phone photo, or pasted as text), SeeYou `.cup`, `.wpt` waypoint files (Flymaster, CompeGPS, OziExplorer) and GPX. Waypoint files add their waypoints to the map to build a task from;
+- export: an XCTrack QR code, `.xctsk`, SeeYou `.cup` (waypoints and task), Flymaster and CompeGPS `.wpt`, GPX;
+- with the API (`api/`), the task model's winner's time and goal share for the task with that day's weather and pilots. The task as it was set predicts exactly what the card shows; changes add what the model sees.
+
+The formats and the distances are in `src/scripts/xctask.ts` (no DOM, so it can be tested in Node); the editor is `src/scripts/planner.ts`. The waypoints and each task's settings come from `scripts/export_waypoints.py`:
+
+```bash
+python scripts/export_waypoints.py --db "G:/My Drive/IGCS/database" --web web/public/data
+```
+
+It reads `tasks/` in the web data, so run it after copying the exported data, and again whenever notebook 13 rewrites the tasks.
 
 The page reads its data at runtime from `public/data/`, written by `scripts/export_web.py` (last step of notebook 09) and `scripts/task_model.py` (notebook 13), both into `database/web_data/` in Drive. That folder is not in git. It holds places and aggregates only, never pilot names or tracks.
 
@@ -17,6 +36,7 @@ cd web
 npm install
 # copy the exported data, e.g. from Google Drive for desktop on Windows:
 #   robocopy "G:\My Drive\IGCS\database\web_data" public\data /E
+python ../scripts/export_waypoints.py --db "G:/My Drive/IGCS/database" --web public/data
 npm run dev          # http://localhost:4321
 ```
 

@@ -77,7 +77,7 @@ The tracks are too big for git. They live in the project's Google Drive folder.
 
 ## Next steps
 
-Done so far: the database (01–08), the weather (07, 07b–07e), the thermal model v0 (09), gliders, ratings and the task baseline (10), the wind check (11), the task model with weather (13), the web demo and the API. Step by step from here:
+Done so far: the database (01–08), the weather (07, 07b–07e), the thermal model v0 (09), gliders, ratings and the task baseline (10), the wind check (11), the task model with weather (13), the web demo with its task planner, and the API. Step by step from here:
 
 1. **Live tasks with forecasts:** design a task for a coming day with forecast models (GFS, ECMWF, HRRR) in place of ERA5, from the competition's waypoints, cylinders, start and goal; then the likely route over the predicted thermals and alternative tasks that land in the committee's target.
 2. **Task model v2:** the weather hour by hour along the route rather than averaged over the task window; each pilot's result (goal, time) from rating, glider and harness, added up into the goal share; the thermal model's predictions along the legs.
@@ -86,6 +86,6 @@ Done so far: the database (01–08), the weather (07, 07b–07e), the thermal mo
 5. **Regional weather layers:** HRRR (United States), CERRA (Europe); radiosonde soundings (IGRA2) for validation.
 6. **Web:** a 3D terrain view of each site (as in ParaglidingMeteograms), finer cells on the map, and the analyzer inside xcmeteo.com with sign-in.
 
-The web page (`web/`, Astro + MapLibre on Cloudflare Pages) maps the sites and, per site, how often pilots found a climb in each cell and what the thermal model predicts, and the site's tasks with the task model's predictions; see [web/README.md](web/README.md).
+The web page (`web/`, Astro + MapLibre on Cloudflare Pages) maps the sites and, per site, how often pilots found a climb in each cell and what the thermal model predicts, and the site's tasks with the task model's predictions. Its task planner sets a task on the map for a past day (turnpoints, cylinders, start and deadline, optimized distances as in FAI S7F), reads and writes the formats flight instruments use (XCTrack QR code and `.xctsk`, SeeYou `.cup`, Flymaster and CompeGPS `.wpt`, GPX) and asks the API what the task model predicts for it; see [web/README.md](web/README.md).
 
 The models are described in [docs/model_design.md](docs/model_design.md).

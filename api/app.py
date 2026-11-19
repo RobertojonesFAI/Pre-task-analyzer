@@ -10,7 +10,7 @@ predicts the winner's time and the share in goal.
 Endpoints:
     GET  /health    what is loaded
     POST /predict   {"site": site_id, "template": task_key, "route": [[lat, lon, radius_m], ...],
-                     "start_solar_h": optional}
+                     "start_solar_h": optional, "ss_km": optional optimized speed-section distance}
 """
 
 import json
@@ -35,7 +35,7 @@ import task_model as TM  # noqa: E402
 DB = Path(os.environ.get("PTA_DB", ROOT / "database"))
 WEB = Path(os.environ.get("PTA_WEB", DB / "web_data"))
 ORIGINS = [o.strip() for o in os.environ.get("PTA_ORIGINS", "*").split(",") if o.strip()]
-MAX_POINTS, MAX_KM, MAX_FROM_SITE_DEG = 15, 400.0, 3.0
+MAX_POINTS, MAX_KM, MAX_FROM_SITE_DEG = 25, 400.0, 3.0
 
 app = FastAPI(title="Pre-task Analyzer API", version="1")
 app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "POST"], allow_headers=["*"])
@@ -83,13 +83,15 @@ class Request(BaseModel):
     template: str = Field(description="task_key of the day to re-plan")
     route: list[list[float]] = Field(description="[[lat, lon, radius_m], ...] in order, takeoff first")
     start_solar_h: float | None = None
+    ss_km: float | None = Field(None, description="the route's optimized speed-section distance (S7F), when the page "
+                                                  "computed it from the cylinders")
 
 
 def route_km(pts):
     return sum(TM.km_between(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]) for i in range(len(pts) - 1))
 
 
-def features(task, feats, site, pts, start_solar_h, tpl):
+def features(task, feats, site, pts, start_solar_h, tpl, ss_given=None):
     """The task's feature vector with a new route (and start): weather along the route in the
     task's window, distance, turnpoints. Returns (x, ss_km, weather, window)."""
     at = {f: i for i, f in enumerate(feats)}
@@ -109,8 +111,12 @@ def features(task, feats, site, pts, start_solar_h, tpl):
     for f in TM.WEATHER:
         if f in at:
             x[at[f]] = None if pd.isna(wx[f]) else float(wx[f])
-    # distance on the same footing as the task's own: its speed-section distance scaled by route length
-    ss_km = task["km"] * km / route_km(tpl) if task.get("km") and len(tpl) >= 2 and route_km(tpl) > 0 else km
+    # the optimized speed-section distance when the page measured it from the cylinders, as the task's own
+    # distance was; otherwise the task's distance scaled by the length of the route through the centres
+    if ss_given is not None:
+        ss_km = ss_given
+    else:
+        ss_km = task["km"] * km / route_km(tpl) if task.get("km") and len(tpl) >= 2 and route_km(tpl) > 0 else km
     if "ss_km" in at:
         x[at["ss_km"]] = ss_km
     if "n_turnpoints" in at and x[at["n_turnpoints"]] is not None:   # only where the model knew it for this task
@@ -137,9 +143,11 @@ def predict(req: Request):
     km = route_km(pts)
     if not 1.0 <= km <= MAX_KM:
         raise HTTPException(422, f"route length {km:.0f} km is out of range")
+    if req.ss_km is not None and not 1.0 <= req.ss_km <= MAX_KM:
+        raise HTTPException(422, f"speed section {req.ss_km:.0f} km is out of range")
 
     tpl = [p[:3] for p in (task.get("route") or [])]
-    x_new, ss_km, wx, window_utc = features(task, data["features"], site, pts, req.start_solar_h, tpl)
+    x_new, ss_km, wx, window_utc = features(task, data["features"], site, pts, req.start_solar_h, tpl, req.ss_km)
     # the task as it was set, through the same steps, so rounding in the stored data cancels out
     x_tpl = features(task, data["features"], site, tpl, None, tpl)[0] if len(tpl) >= 2 else task["x"]
     m = STATE["model"]["targets"]

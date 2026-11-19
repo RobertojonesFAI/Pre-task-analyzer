@@ -3,7 +3,12 @@
 A small FastAPI service that re-plans a past task with a new route: same day, same pilots, the
 route a committee draws on the web page. It reads ERA5 along the new route in the task's window,
 exactly as `scripts/task_model.py` does for training, and returns the task model's winner's time and
-goal share. The web page works without it; with it, the task card shows "Draw a new route for this day".
+goal share. The web page works without it (the task planner still imports and exports tasks); with it,
+the planner predicts the tasks set on it.
+
+`POST /predict` takes `{"site", "template" (the day's task_key), "route": [[lat, lon, radius_m], ...],
+"ss_km", "start_solar_h"}`. The page sends the route's optimized speed-section distance (`ss_km`), measured
+from the cylinders as the official one is, and a start time only when it differs from the day's.
 
 It runs on the OptiPlex (see [docs/deployment.md](../docs/deployment.md)) and is published through a
 Cloudflare Tunnel on the project's domain.
