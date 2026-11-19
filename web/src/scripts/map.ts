@@ -127,7 +127,7 @@ async function selectSite(map: maplibregl.Map, s: Site) {
     src.setData({ type: "FeatureCollection", features: [] });
   }
   $("s-facts").innerHTML = facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
-  renderTasks(s, $("tasks-box"));
+  renderTasks(s, $("tasks-box"), $("planner"));
   map.fitBounds([[s.box[0], s.box[1]], [s.box[2], s.box[3]]], { padding: 40, duration: 900 });
 }
 

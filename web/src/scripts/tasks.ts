@@ -1,7 +1,7 @@
 // Task explorer: a site's past tasks, what the task model predicted for them (without having seen
 // that competition) against what happened, and "what if" changes evaluated in the browser.
 
-import { closePlanner, openPlanner } from "./planner";
+import { mountPlanner, planFrom } from "./planner";
 
 // A tree is a leaf value or [feature, threshold, missing goes left (1/0), left, right]
 type Tree = number | [number, number, number, Tree, Tree];
@@ -89,9 +89,8 @@ export function modelSummary(m: TaskModel): string {
 
 export type SiteRef = { id: string; name: string; lat: number; lon: number };
 
-export async function renderTasks(site: SiteRef, box: HTMLElement) {
+export async function renderTasks(site: SiteRef, box: HTMLElement, plannerBox: HTMLElement) {
   const siteId = site.id;
-  closePlanner();
   box.innerHTML = "";
   let data: SiteTasks | null = null;
   try {
@@ -101,6 +100,8 @@ export async function renderTasks(site: SiteRef, box: HTMLElement) {
     data = null;
   }
   const m = await loadTaskModel();
+  // the task planner, open from the start: it predicts with the site's competition days
+  mountPlanner(plannerBox, { site, days: data?.tasks ?? [] });
   if (!data || !data.tasks.length) {
     box.hidden = true;
     return;
@@ -108,7 +109,6 @@ export async function renderTasks(site: SiteRef, box: HTMLElement) {
   box.hidden = false;
   const list = () => {
     onSelect(null);
-    closePlanner();
     box.innerHTML = `<h3>Tasks <span class="count">${data!.tasks.length}</span></h3>
       <p class="hint">Predicted by the task model before seeing each competition, against what happened.</p>
       <ol class="tasks">${data!.tasks.map((t, i) => {
@@ -122,7 +122,6 @@ export async function renderTasks(site: SiteRef, box: HTMLElement) {
   };
   const card = (i: number) => {
     const t = data!.tasks[i];
-    closePlanner();
     onSelect(t.route && t.route.length ? t.route : null);
     const f = data!.features;
     const at = (name: string) => f.indexOf(name);
@@ -148,6 +147,7 @@ export async function renderTasks(site: SiteRef, box: HTMLElement) {
           <span class="big pred">${pct(ref(t.pred_goal))}</span><span class="sub">predicted with weather</span>
           <span class="small">${pct(ref(t.base_goal))} without weather</span></div>
       </div>
+      <div class="btns"><button id="t-plan">Open this task in the planner</button></div>
       ${m ? `<div class="whatif">
         <h4>What if the committee changed the task?</h4>
         <label>Speed-section distance <b id="w-km"></b>
@@ -158,10 +158,9 @@ export async function renderTasks(site: SiteRef, box: HTMLElement) {
           <div><span class="lbl">In goal</span><b id="w-goal"></b></div></div>
         <p class="hint">Starts from the prediction above and adds the change the model sees, evaluated in your browser. The weather stays as it was on the day.</p>
       </div>` : ""}
-      <section class="planner" id="planner"></section>
       ${weather ? `<h4>Weather along the route (ERA5)</h4><dl class="wx">${weather}</dl>` : ""}`;
     box.querySelector("#t-back")!.addEventListener("click", list);
-    openPlanner(box.querySelector<HTMLElement>("#planner")!, { site, template: t });
+    box.querySelector("#t-plan")!.addEventListener("click", () => planFrom(t.key));
     if (!m) return;
     const rKm = box.querySelector<HTMLInputElement>("#r-km")!, rStart = box.querySelector<HTMLInputElement>("#r-start")!;
     // start from the honest prediction (made without this competition) and apply the change the
