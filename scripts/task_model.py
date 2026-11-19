@@ -65,30 +65,33 @@ def bearing(lat1, lon1, lat2, lon2):
     return np.arctan2(np.sin(dl) * np.cos(p2), np.cos(p1) * np.sin(p2) - np.sin(p1) * np.cos(p2) * np.cos(dl))
 
 
+def route_from_points(la, lo):
+    """Chips the route crosses (a point every STEP_KM between cylinder centres) and its legs
+    [(km, bearing)]."""
+    la, lo = np.asarray(la, float), np.asarray(lo, float)
+    pts_la, pts_lo, legs = [la[0]], [lo[0]], []
+    for i in range(len(la) - 1):
+        d = km_between(la[i], lo[i], la[i + 1], lo[i + 1])
+        if d < 0.5:
+            continue
+        legs.append((d, bearing(la[i], lo[i], la[i + 1], lo[i + 1])))
+        n = max(int(d // STEP_KM), 1)
+        f = np.arange(1, n + 1) / n
+        pts_la.extend(la[i] + f * (la[i + 1] - la[i]))
+        pts_lo.extend(lo[i] + f * (lo[i + 1] - lo[i]))
+    return np.unique(grid.chip_id(np.array(pts_la), np.array(pts_lo))), legs
+
+
 def routes(db, t):
     """{task_key: (chip_ids, [(leg km, bearing)])} from the turnpoints; empty when no coordinates."""
     out = {}
-    tp = None
-    if (db / "turnpoints.parquet").exists():
-        tp = pd.read_parquet(db / "turnpoints.parquet", columns=["task_key", "seq", "lat", "lon"])
-        tp = tp[tp["task_key"].isin(t["task_key"])].dropna(subset=["lat", "lon"])
-    if tp is None or not len(tp):
+    if not (db / "turnpoints.parquet").exists():
         return out
+    tp = pd.read_parquet(db / "turnpoints.parquet", columns=["task_key", "seq", "lat", "lon"])
+    tp = tp[tp["task_key"].isin(t["task_key"])].dropna(subset=["lat", "lon"])
     for key, g in tp.sort_values(["task_key", "seq"]).groupby("task_key"):
-        la, lo = g["lat"].to_numpy(float), g["lon"].to_numpy(float)
-        if len(la) < 2:
-            continue
-        pts_la, pts_lo, legs = [la[0]], [lo[0]], []
-        for i in range(len(la) - 1):
-            d = km_between(la[i], lo[i], la[i + 1], lo[i + 1])
-            if d < 0.5:
-                continue
-            legs.append((d, bearing(la[i], lo[i], la[i + 1], lo[i + 1])))
-            n = max(int(d // STEP_KM), 1)
-            f = np.arange(1, n + 1) / n
-            pts_la.extend(la[i] + f * (la[i + 1] - la[i]))
-            pts_lo.extend(lo[i] + f * (lo[i + 1] - lo[i]))
-        out[key] = (np.unique(grid.chip_id(np.array(pts_la), np.array(pts_lo))), legs)
+        if len(g) >= 2:
+            out[key] = route_from_points(g["lat"], g["lon"])
     return out
 
 
@@ -114,50 +117,50 @@ def _read(path, cols, chips):
     have = set(pq.ParquetFile(path).schema.names)
     use = [c for c in cols if c in have]
     d = pd.read_parquet(path, columns=use)
-    d = d[d["chip_id"].isin(chips)]
+    if chips is not None:
+        d = d[d["chip_id"].isin(chips)]
     if "time" in d:
         d["time"] = pd.to_datetime(d["time"]).astype("datetime64[ns]")
     return d
 
 
-def weather(db, t):
-    """One row of weather features per task."""
-    rt = routes(db, t)
-    site_chips = pd.read_parquet(db / "site_chips.parquet", columns=["site_id", "chip_id", "in_area"])
-    area = {s: g.loc[g["in_area"].fillna(False).astype(bool), "chip_id"].to_numpy()
-            for s, g in site_chips.groupby("site_id")}
-    start, end = windows(t)
-    rows = []
-    for i, r in enumerate(t.itertuples(index=False)):
-        chips = rt[r.task_key][0] if r.task_key in rt else area.get(r.site_id, np.array([], int))
-        if not len(chips):
-            continue
-        hours = pd.date_range(start.iloc[i].floor("h"), end.iloc[i].floor("h"), freq="h")
-        for h in hours:
-            for c in chips:
-                rows.append((r.task_key, int(c), h))
-    need = pd.DataFrame(rows, columns=["task_key", "chip_id", "time"])
+SINGLE_COLS = ["blh_m", "cloud_base_m", "cape", "cin", "sensible_heat_wm2", "sunshine_wm2", "cloud_total", "cloud_low",
+               "rain_mmh", "t2m_c", "dewpoint_c", "u100", "v100", "u10", "v10", "gust10"]
+LEVEL_COLS = ["t_850", "t_700", "z_850", "z_700", "u_850", "v_850", "u_700", "v_700", "rh_700", "rh_850"]
+EXTRA_COLS = ["skin_temp_c", "soil_moisture", "freezing_level_m"]
+
+
+def load_tables(db, chips=None):
+    """The weather tables (only `chips` when given) and each chip's mean ground height."""
+    w = db / "weather"
+    t = {"single": _read(w / "era5_single.parquet", ["chip_id", "time", *SINGLE_COLS], chips),
+         "levels": _read(w / "era5_levels.parquet", ["chip_id", "time", *LEVEL_COLS], chips),
+         "extra": _read(w / "era5_extra.parquet", ["chip_id", "time", *EXTRA_COLS], chips),
+         "static": _read(w / "era5_static.parquet", ["chip_id", "ground_m"], chips)}
+    cells = pd.read_parquet(db / "cells.parquet", columns=["chip_id", "elev_mean"])
+    if chips is not None:
+        cells = cells[cells["chip_id"].isin(chips)]
+    t["elev"] = cells.groupby("chip_id")["elev_mean"].mean().rename("route_elev").reset_index()
+    if t["levels"] is not None:
+        t["levels"] = t["levels"].rename(columns={"time": "time3"}).drop_duplicates(["chip_id", "time3"])
+    return t
+
+
+def features_from(need, tables, legs):
+    """Weather features per task from `need` (task_key, chip_id, time: the route's chips and the
+    task's hours) and the tables; `legs` {task_key: [(km, bearing)]} for the wind along the route."""
+    need = need.copy()
     need["time"] = need["time"].astype("datetime64[ns]")
     need["time3"] = need["time"].dt.round("3h")
-    chips = set(need["chip_id"])
-    w = db / "weather"
-    s = _read(w / "era5_single.parquet", ["chip_id", "time", "blh_m", "cloud_base_m", "cape", "cin", "sensible_heat_wm2",
-                                          "sunshine_wm2", "cloud_total", "cloud_low", "rain_mmh", "t2m_c", "dewpoint_c",
-                                          "u100", "v100", "u10", "v10", "gust10"], chips)
+    s = tables.get("single")
     d = need.merge(s, on=["chip_id", "time"], how="left") if s is not None else need
-    lv = _read(w / "era5_levels.parquet", ["chip_id", "time", "t_850", "t_700", "z_850", "z_700", "u_850", "v_850",
-                                           "u_700", "v_700", "rh_700", "rh_850"], chips)
-    if lv is not None:
-        d = d.merge(lv.rename(columns={"time": "time3"}).drop_duplicates(["chip_id", "time3"]), on=["chip_id", "time3"], how="left")
-    ex = _read(w / "era5_extra.parquet", ["chip_id", "time", "skin_temp_c", "soil_moisture", "freezing_level_m"], chips)
-    if ex is not None:
-        d = d.merge(ex, on=["chip_id", "time"], how="left")
-    st = _read(w / "era5_static.parquet", ["chip_id", "ground_m"], chips)
-    if st is not None:
-        d = d.merge(st, on="chip_id", how="left")
-    cells = pd.read_parquet(db / "cells.parquet", columns=["chip_id", "elev_mean"])
-    elev = cells[cells["chip_id"].isin(chips)].groupby("chip_id")["elev_mean"].mean().rename("route_elev")
-    d = d.merge(elev.reset_index(), on="chip_id", how="left")
+    if tables.get("levels") is not None:
+        d = d.merge(tables["levels"], on=["chip_id", "time3"], how="left")
+    if tables.get("extra") is not None:
+        d = d.merge(tables["extra"], on=["chip_id", "time"], how="left")
+    if tables.get("static") is not None:
+        d = d.merge(tables["static"], on="chip_id", how="left")
+    d = d.merge(tables["elev"], on="chip_id", how="left")
     if "ground_m" not in d:
         d["ground_m"] = d["route_elev"]
 
@@ -182,24 +185,22 @@ def weather(db, t):
     out["route_chips"] = by["chip_id"].nunique()
     if "blh_m" in d:
         out["blh_mean"] = by["blh_m"].mean()
+        out["blh_max"] = d.groupby(["task_key", "time"])["blh_m"].mean().groupby("task_key").max()   # highest hour
     if "rain_mmh" in d:
         out["rain_mm"] = by["rain_mmh"].sum(min_count=1)
-    # the highest hour of the boundary layer over the route
-    if "blh_m" in d:
-        out["blh_max"] = d.groupby(["task_key", "time"])["blh_m"].mean().groupby("task_key").max()
     # wind along the route, leg by leg
     for lvl, (u, v) in {"100": ("u100", "v100"), "700": ("u_700", "v_700")}.items():
         tail, cross = {}, {}
-        for key, (_, legs) in rt.items():
-            if key not in out.index or u not in out or not legs or np.isnan(out.at[key, u]):
+        for key, lg in legs.items():
+            if key not in out.index or u not in out or not lg or np.isnan(out.at[key, u]):
                 continue
             uu, vv = out.at[key, u], out.at[key, v]
-            L = np.array([leg[0] for leg in legs])
-            b = np.array([leg[1] for leg in legs])
+            L = np.array([x[0] for x in lg])
+            b = np.array([x[1] for x in lg])
             tail[key] = float((L * (uu * np.sin(b) + vv * np.cos(b))).sum() / L.sum())
             cross[key] = float((L * np.abs(-uu * np.cos(b) + vv * np.sin(b))).sum() / L.sum())
-        out[f"tailwind_{lvl}"] = pd.Series(tail)
-        out[f"crosswind_{lvl}"] = pd.Series(cross)
+        out[f"tailwind_{lvl}"] = pd.Series(tail, dtype=float)
+        out[f"crosswind_{lvl}"] = pd.Series(cross, dtype=float)
     # rain the day before (soil and early convection)
     if s is not None and "rain_mmh" in s:
         prev = need.assign(time=need["time"] - pd.Timedelta(days=1))[["task_key", "chip_id", "time"]].drop_duplicates()
@@ -208,8 +209,29 @@ def weather(db, t):
     for c in WEATHER:
         if c not in out:
             out[c] = np.nan
-    out["has_route"] = out.index.isin(list(rt))
+    out["has_route"] = out.index.isin([k for k, lg in legs.items() if lg])
     return out[WEATHER + ["has_route"]]
+
+
+def need_rows(key, chips, start, end):
+    hours = pd.date_range(pd.Timestamp(start).floor("h"), pd.Timestamp(end).floor("h"), freq="h")
+    return [(key, int(c), h) for h in hours for c in chips]
+
+
+def weather(db, t):
+    """One row of weather features per task."""
+    rt = routes(db, t)
+    site_chips = pd.read_parquet(db / "site_chips.parquet", columns=["site_id", "chip_id", "in_area"])
+    area = {s_: g.loc[g["in_area"].fillna(False).astype(bool), "chip_id"].to_numpy()
+            for s_, g in site_chips.groupby("site_id")}
+    start, end = windows(t)
+    rows = []
+    for i, r in enumerate(t.itertuples(index=False)):
+        chips = rt[r.task_key][0] if r.task_key in rt else area.get(r.site_id, np.array([], int))
+        rows += need_rows(r.task_key, chips, start.iloc[i], end.iloc[i])
+    need = pd.DataFrame(rows, columns=["task_key", "chip_id", "time"])
+    tables = load_tables(db, set(need["chip_id"]))
+    return features_from(need, tables, {k: v[1] for k, v in rt.items()})
 
 
 # ── Models ───────────────────────────────────────────────────────────────────

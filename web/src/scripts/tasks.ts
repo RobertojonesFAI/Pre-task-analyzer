@@ -16,6 +16,24 @@ type Task = {
 type SiteTasks = { features: string[]; tasks: Task[] };
 
 let model: TaskModel | null = null;
+
+// The API (the OptiPlex, behind a Cloudflare Tunnel) re-plans a task with a new route. Its address
+// comes from PUBLIC_API_URL at build time, or ?api= in the page address; without it the page works alone.
+const API = (new URLSearchParams(location.search).get("api") || import.meta.env.PUBLIC_API_URL || "").replace(/\/$/, "");
+let apiOk: Promise<boolean> | null = null;
+function apiAvailable(): Promise<boolean> {
+  if (!API) return Promise.resolve(false);
+  apiOk ??= fetch(`${API}/health`).then((r) => r.ok).catch(() => false);
+  return apiOk;
+}
+
+type Point = [number, number, number];   // lat, lon, cylinder radius (m)
+type MapHooks = { draw: (on: boolean, onChange: (pts: Point[]) => void) => void; undo: () => void; clear: () => void };
+let hooks: MapHooks | null = null;
+/** The map lets the task card draw a route: clicks add turnpoints while drawing is on. */
+export function setMapHooks(h: MapHooks) {
+  hooks = h;
+}
 let onSelect: (route: Task["route"] | null) => void = () => {};
 
 /** Called with a task's route when one is opened, and with null when the list is shown again. */
@@ -84,7 +102,57 @@ export function modelSummary(m: TaskModel): string {
     <b>${Math.round(100 * g["with weather"].mae)} points</b> (without weather ${Math.round(100 * g["without weather"].mae)}).`;
 }
 
+let currentSite = "";
+
+function redesign(t: Task) {
+  const el = document.getElementById("redesign");
+  if (!el || !hooks) return;
+  apiAvailable().then((ok) => {
+    if (!ok) return;
+    el.hidden = false;
+    let pts: Point[] = [];
+    let drawing = false;
+    const draw = el.querySelector<HTMLButtonElement>("#d-draw")!, go = el.querySelector<HTMLButtonElement>("#d-go")!;
+    const ptsEl = el.querySelector("#d-pts")!, out = el.querySelector("#d-out")!;
+    const changed = (p: Point[]) => {
+      pts = p;
+      go.disabled = pts.length < 2;
+      ptsEl.textContent = pts.length ? `${pts.length} turnpoint${pts.length > 1 ? "s" : ""}` : "";
+    };
+    draw.addEventListener("click", () => {
+      drawing = !drawing;
+      draw.textContent = drawing ? "Stop drawing" : "Start drawing";
+      draw.classList.toggle("on", drawing);
+      hooks!.draw(drawing, changed);
+    });
+    el.querySelector("#d-undo")!.addEventListener("click", () => hooks!.undo());
+    el.querySelector("#d-clear")!.addEventListener("click", () => { hooks!.clear(); out.innerHTML = ""; });
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      out.innerHTML = `<p class="hint">Reading the weather along your route…</p>`;
+      try {
+        const r = await fetch(`${API}/predict`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ site: currentSite, template: t.key, route: pts }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || r.statusText);
+        const w = j.weather || {};
+        out.innerHTML = `<div class="whatif-out"><div><span class="lbl">Winner's time</span><b>${hm(j.winner_h)}</b></div>
+          <div><span class="lbl">In goal</span><b>${pct(j.goal_share)}</b></div></div>
+          <p class="hint">${j.ss_km} km speed section · boundary layer ${w.blh_mean == null ? "–" : Math.round(w.blh_mean)} m
+          · ${w.tailwind_700 == null ? "–" : (w.tailwind_700 >= 0 ? "tailwind " : "headwind ") + Math.abs(w.tailwind_700).toFixed(1)} m/s at 700 hPa
+          · ${w.route_chips ?? "–"} weather chips along the route.</p>`;
+      } catch (e) {
+        out.innerHTML = `<p class="hint">The API could not predict this route: ${esc(String((e as Error).message || e))}</p>`;
+      }
+      go.disabled = pts.length < 2;
+    });
+  });
+}
+
 export async function renderTasks(siteId: string, box: HTMLElement) {
+  currentSite = siteId;
   box.innerHTML = "";
   let data: SiteTasks | null = null;
   try {
@@ -101,6 +169,8 @@ export async function renderTasks(siteId: string, box: HTMLElement) {
   box.hidden = false;
   const list = () => {
     onSelect(null);
+    hooks?.draw(false, () => {});
+    hooks?.clear();
     box.innerHTML = `<h3>Tasks <span class="count">${data!.tasks.length}</span></h3>
       <p class="hint">Predicted by the task model before seeing each competition, against what happened.</p>
       <ol class="tasks">${data!.tasks.map((t, i) => {
@@ -114,6 +184,8 @@ export async function renderTasks(siteId: string, box: HTMLElement) {
   };
   const card = (i: number) => {
     const t = data!.tasks[i];
+    hooks?.draw(false, () => {});
+    hooks?.clear();
     onSelect(t.route && t.route.length ? t.route : null);
     const f = data!.features;
     const at = (name: string) => f.indexOf(name);
@@ -149,8 +221,17 @@ export async function renderTasks(siteId: string, box: HTMLElement) {
           <div><span class="lbl">In goal</span><b id="w-goal"></b></div></div>
         <p class="hint">Starts from the prediction above and adds the change the model sees, evaluated in your browser. The weather stays as it was on the day.</p>
       </div>` : ""}
+      <div class="redesign" id="redesign" hidden>
+        <h4>Draw a new route for this day</h4>
+        <p class="hint">Click on the map to place the turnpoints, takeoff first. The API reads the weather of this day along your route and predicts it.</p>
+        <div class="btns"><button id="d-draw">Start drawing</button><button id="d-undo">Undo</button><button id="d-clear">Clear</button>
+          <button id="d-go" class="primary" disabled>Predict</button></div>
+        <p class="d-pts" id="d-pts"></p>
+        <div class="d-out" id="d-out"></div>
+      </div>
       ${weather ? `<h4>Weather along the route (ERA5)</h4><dl class="wx">${weather}</dl>` : ""}`;
     box.querySelector("#t-back")!.addEventListener("click", list);
+    redesign(t);
     if (!m) return;
     const rKm = box.querySelector<HTMLInputElement>("#r-km")!, rStart = box.querySelector<HTMLInputElement>("#r-start")!;
     // start from the honest prediction (made without this competition) and apply the change the
