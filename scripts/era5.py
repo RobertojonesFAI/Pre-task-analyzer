@@ -306,39 +306,49 @@ def _deaccumulate_land(df):
 TABLES = (*DATASETS, "extra")   # extra: only from ARCO-ERA5 (era5_arco.py --product extra)
 
 
+def _one_file(path, dataset, wanted_chips):
+    """One raw CDS file as tidy rows of the wanted chips only (filtered right away: a file of a
+    large regional box holds far more points than the sites use)."""
+    parts = [_tidy(ds, dataset) for ds in _datasets(path)]
+    df = parts[0]
+    for p in parts[1:]:
+        df = df.merge(p, on=["time", "latitude", "longitude"], how="outer")
+    df = df.drop_duplicates(["time", "latitude", "longitude"], keep="last")
+    if dataset == "land":
+        df = _deaccumulate_land(df)   # a file holds whole days, so each file can be de-accumulated alone
+        df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
+        df["lat"], df["lon"] = df["lat"].astype(float).round(1), df["lon"].astype(float).round(1)
+        df["chip_id"] = grid.chip_id(df["lat"].to_numpy(), df["lon"].to_numpy())
+    else:
+        df["chip_id"] = grid.chip_id(df["latitude"].round(2).to_numpy(), df["longitude"].round(2).to_numpy())
+        df = df.drop(columns=["latitude", "longitude"])
+    df = df[df["chip_id"].isin(wanted_chips)]
+    for c in df.columns:
+        if df[c].dtype == "float64" and c not in ("lat", "lon"):
+            df[c] = df[c].astype("float32")
+    return df
+
+
 def convert(weather, wanted_chips, tables=TABLES):
-    """Tidy tables from every raw file and every month read from ARCO-ERA5."""
+    """Tidy tables from every raw CDS file and every month read from ARCO-ERA5 or Earth Engine.
+    Where two sources have the same hour, the later one (ARCO, Earth Engine) is kept."""
     for dataset in tables:
         files = sorted((weather / "raw" / dataset).glob("*.nc"))
         arco = sorted((weather / "arco" / dataset).glob("*.parquet"))  # from era5_arco.py
         gee = sorted((weather / "gee" / dataset).glob("*.parquet"))    # from era5_land_gee.py (ERA5-Land)
         if not files and not arco and not gee:
             continue
-        frames = []
-        for path in files:
-            parts = [_tidy(ds, dataset) for ds in _datasets(path)]
-            df = parts[0]
-            for p in parts[1:]:
-                df = df.merge(p, on=["time", "latitude", "longitude"], how="outer")
-            frames.append(df)
-        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["time", "latitude", "longitude"])
-        df = df.drop_duplicates(["time", "latitude", "longitude"], keep="last")
+        frames = [_one_file(path, dataset, wanted_chips) for path in files]
+        for path in arco + gee:
+            d = pd.read_parquet(path)
+            frames.append(d[d["chip_id"].isin(wanted_chips)])
+        df = pd.concat([f for f in frames if len(f)], ignore_index=True)
+        del frames
         if dataset == "land":
-            if frames:
-                df = _deaccumulate_land(df)
-                df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
-                df["chip_id"] = grid.chip_id(df["lat"].to_numpy(), df["lon"].to_numpy())
-            if gee:  # the same table read from Earth Engine (hourly already); together they cover every hour
-                df = pd.concat(([df] if frames else []) + [pd.read_parquet(p) for p in gee], ignore_index=True)
-                df["lat"], df["lon"] = df["lat"].astype(float).round(1), df["lon"].astype(float).round(1)
-                df = df.drop_duplicates(["lat", "lon", "time"], keep="last")
-            df = df[df["chip_id"].isin(wanted_chips)]
+            df["lat"], df["lon"] = df["lat"].astype(float).round(1), df["lon"].astype(float).round(1)
+            df = df.drop_duplicates(["lat", "lon", "time"], keep="last")
         else:
-            df["chip_id"] = grid.chip_id(df["latitude"].round(2).to_numpy(), df["longitude"].round(2).to_numpy())
-            df = df[df["chip_id"].isin(wanted_chips)].drop(columns=["latitude", "longitude"])
-            if arco:  # the same variables read from ARCO-ERA5; together they cover every hour
-                df = pd.concat(([df] if frames else []) + [pd.read_parquet(p) for p in arco], ignore_index=True)
-                df = df[df["chip_id"].isin(wanted_chips)].drop_duplicates(["chip_id", "time"], keep="last")
+            df = df.drop_duplicates(["chip_id", "time"], keep="last")
         cols = ["chip_id", "time"] + [c for c in df.columns if c not in ("chip_id", "time")]
         df = df[cols].sort_values(["chip_id", "time"]).reset_index(drop=True)
         for c in df.columns[2:]:
@@ -347,6 +357,7 @@ def convert(weather, wanted_chips, tables=TABLES):
         df.to_parquet(weather / f"era5_{dataset}.parquet", index=False)
         print(f"  era5_{dataset}.parquet: {len(df):,} rows, {df['chip_id'].nunique():,} chips, "
               f"{df['time'].dt.normalize().nunique():,} days", flush=True)
+        del df
 
 
 _GEE_DONE, _DAYS = {}, {}
