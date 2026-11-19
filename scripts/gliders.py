@@ -3,7 +3,8 @@
 EN-C, EN-B, EN-A).
 
 Pilots and scoring sites write the same glider many ways ("Ozone Enzo 3", "OZONE ENZO3",
-"Enzo 3 MS"). Names are reduced to a key (lower case, no brand, no size, no spaces), then each
+"Enzo 3 MS", "Ozone Enzo 3 / Ozone Submarine"). Names are reduced to a key (the wing only, not
+the harness after a slash; lower case, no brand, no size, no spaces, common typos fixed), then each
 key gets a class:
 
     declared   the class most results with that key declare (results.glider_cert)
@@ -36,13 +37,19 @@ CURATED = {
     "rush": "EN-B", "mentor": "EN-B",
 }
 CLASSES = ["CCC", "EN-D", "EN-C", "EN-B", "EN-A"]
+TYPOS = {"iceapeak": "icepeak", "boomarang": "boomerang", "boomerag": "boomerang", "zeno 2": "zeno2"}
+ALIASES = {"icepeakxone": "xone", "xone": "xone"}   # the same wing under two names
 
 
 def key(name):
     """'OZONE Enzo 3 MS' -> 'enzo3'."""
     if not isinstance(name, str) or not name.strip():
         return ""
-    s = name.lower().replace("x-alps", "xalps").replace("x alps", "xalps").replace("x-one", "xone")
+    parts = [p for p in re.split(r"\s*/\s*|\s+\+\s+|\s+&\s+", name.lower().strip()) if p.strip()]
+    s = parts[0] if parts else ""   # "wing / harness": the wing comes first
+    for wrong, right in TYPOS.items():
+        s = s.replace(wrong, right)
+    s = s.replace("x-alps", "xalps").replace("x alps", "xalps").replace("x-one", "xone").replace("x one", "xone")
     for b in sorted(BRANDS, key=len, reverse=True):
         s = re.sub(rf"(^|[\s\-_/]){re.escape(b)}(?=$|[\s\-_/])", " ", s)
     s = re.sub(r"(\d)\s+\d{2}(?:[.,]\d+)?\s*(?:m2|m²|sqm)?\s*$", r"\1", s.strip())   # area after the model number
@@ -50,7 +57,8 @@ def key(name):
     words = s.split()
     while words and (words[-1] in SIZES or re.fullmatch(r"\d{2}(\.\d)?m?2?", words[-1]) and len(words) > 2):
         words.pop()   # a trailing size ("MS") or area ("22.5") after the model number
-    return "".join(words)
+    k = "".join(words)
+    return ALIASES.get(k, k)
 
 
 def family(k):
