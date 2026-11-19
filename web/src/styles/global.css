@@ -148,6 +148,17 @@ body {
 .whatif-out div { display: flex; flex-direction: column; }
 .whatif-out .lbl { color: var(--text-3); font-size: 12px; }
 .whatif-out b { font-size: 20px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.redesign { margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.redesign h4 { margin: 0 0 4px; }
+.btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.btns button {
+  border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px;
+  padding: 6px 10px; border-radius: 8px; cursor: pointer;
+}
+.btns button.on { border-color: var(--accent); color: var(--accent); }
+.btns button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btns button:disabled { opacity: 0.45; cursor: default; }
+.d-pts { margin: 6px 0 0; font-size: 12px; color: var(--text-3); }
 .wx { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 0; }
 .wx div { background: var(--surface-2); border-radius: 8px; padding: 6px 10px; }
 .wx dt { color: var(--text-3); font-size: 11px; }

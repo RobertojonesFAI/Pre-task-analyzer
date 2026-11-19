@@ -44,6 +44,8 @@ notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
 pta/         shared code: IGC reader, results parsers, flight analysis, the global grid and terrain
 docs/        design notes (model_design.md: the general model; database.md: the tables; deployment.md: how it will be served; results.md: what each step produced)
+api/         the API that re-plans a task with a new route (FastAPI, on the OptiPlex behind a Cloudflare Tunnel)
+web/         the web page (Astro + MapLibre on Cloudflare Pages)
 results/     statistics and coverage maps of the database, refreshed every 10 to 15 commits (notebook 12)
 data/        small tables only (catalogs); tracks live in Google Drive
 ```
