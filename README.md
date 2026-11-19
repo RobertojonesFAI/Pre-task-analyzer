@@ -41,6 +41,7 @@ notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
 pta/         shared code: IGC reader, results parsers, flight analysis, the global grid and terrain
 docs/        design notes (model_design.md: the general model; database.md: the tables; deployment.md: how it will be served; results.md: what each step produced)
+results/     statistics and coverage maps of the database, refreshed every 10 to 15 commits (notebook 12)
 data/        small tables only (catalogs); tracks live in Google Drive
 ```
 
@@ -64,6 +65,7 @@ data/        small tables only (catalogs); tracks live in Google Drive
 | 9 | `notebooks/09_thermal_model.ipynb` | Thermal model v0 (`scripts/thermal_model.py`): the chance that a pilot crossing a 1 km cell finds a climb, from height on arrival, terrain, sun on the slopes and ERA5, scored on sites left out and compared group by group; the pilots' ceilings against ERA5's boundary layer; the data for the web page (`scripts/export_web.py`) | `database/models/thermal_v0/`, `database/web_data/` |
 | 10 | `notebooks/10_task_basics.ipynb` | Glider models and classes (`scripts/gliders.py`), Elo pilot ratings before every task and field strength (`scripts/pilot_ratings.py`), and the task baseline without weather: winner's speed and time and goal share (`scripts/task_baseline.py`) | `database/result_gliders`, `gliders`, `ratings`, `pilot_ratings`, `task_fields`, `models/task_v0/` |
 | 11 | `notebooks/11_wind_check.ipynb` | The wind pilots measured in their thermals against ERA5's wind at the same place, hour and height (`scripts/wind_check.py`), pooled by site, hour and height band: near the ground (what a terrain-flow model has to get right), middle, and free air (the prevailing wind such a model takes as input) | `database/models/wind_check/` |
+| 12 | `notebooks/12_repo_stats.ipynb` | Statistics and coverage maps of the database for the repo (`scripts/repo_stats.py`): totals, by year, source and country, the sites, gliders, ratings and the models' latest scores; maps of the sites, weather chips and most-crossed cells (`.geojson`, which GitHub draws on a map, and `.png`). Counts and aggregates only | `results/` in the repo |
 
 The tracks are too big for git. They live in the project's Google Drive folder.
 
