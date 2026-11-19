@@ -10,6 +10,16 @@ Before a task is set, the task committee enters the task they have in mind (turn
 
 The Meet Director always makes the decision; the tool only advises.
 
+## Results so far
+
+- **Data:** 848 competitions, 3,114 tasks, 173,280 results and 152,930 unique competition flights at 291 sites; 18.6 M crossings of 1 km cells and 3.0 M thermals, with heights above the ground calibrated on each flight's landing.
+- **Weather:** hourly ERA5 (surface, pressure levels, ground and air mass) and ERA5-Land for every site and competition day.
+- **Pilots:** an Elo rating before every task; the pilot rated higher placed better in 72.8% of pairs.
+- **Task baseline without weather:** winner's time within 18 min, goal share within 20 points (simple rules: 22 min, 26 points). The weather has to beat this.
+- **Wind:** ERA5's prevailing wind agrees with what pilots measured in their thermals to 16° in direction (74% within 30°); near the ground, where the terrain takes over, only 63%.
+
+The full log, step by step: [docs/results.md](docs/results.md).
+
 ## How it works
 
 | Part | What it does |
@@ -30,7 +40,7 @@ Data: competition IGC tracks (Flymaster, AirScore, Airtribune and civlcomps.org)
 notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
 pta/         shared code: IGC reader, results parsers, flight analysis, the global grid and terrain
-docs/        design notes (model_design.md: the general model; database.md: the tables; deployment.md: how it will be served)
+docs/        design notes (model_design.md: the general model; database.md: the tables; deployment.md: how it will be served; results.md: what each step produced)
 data/        small tables only (catalogs); tracks live in Google Drive
 ```
 
