@@ -2,7 +2,7 @@
 
 What each step has produced on the full database, in the order the notebooks run. Numbers are copied from the notebooks' output; `results/` holds the statistics and maps generated from the database itself (notebook 12). Both are refreshed every 10 to 15 commits.
 
-Last update: 18 November 2026.
+Last update: 18 November 2026 (09 added).
 
 ## Database
 
@@ -75,6 +75,28 @@ Without weather the model stays close to the average: long days (3 to 4.7 h) are
 - Pilots measure about 0.5 m/s less than ERA5, most in the late morning (−1.1 m/s at 11 h solar, about 0 by 17 h): partly circles re-centred on the core, partly ERA5's morning boundary-layer wind.
 - By site: flat or synoptic sites agree best (Konchinka, Russia: 9°, 94% within 30°; Pegalajar and Piedrahita, Spain: 80–87%); tropical mountain sites worst (Roldanillo, Colombia: 45°, 33%; Valle de Bravo, Mexico: 37°, 44%), where valley and slope winds rule and ERA5 does not resolve them.
 
-## Thermal model (09)
+## Ceiling: pilots vs ERA5's boundary layer (09)
 
-Pending: first run on the calibrated tables.
+The pilots' ceiling (90th percentile of thermal tops per chip and hour, 5+ thermals, calibrated heights) against ERA5's boundary-layer height, both above ERA5's own ground: 18,251 chip-hours.
+
+- Median ceiling 1,151 m against a boundary layer of 1,516 m: pilots top out at about three quarters of it (they leave thermals before the top, and the top of a thermal is below the top of the mixed layer).
+- Correlation 0.61 over all chip-hours (0.25 with ERA5's cloud base).
+- **Day to day within a site: median correlation 0.64 over 136 sites with 5+ days.** ERA5 tells a high day from a low one at the same site.
+
+## Thermal model v0 (09)
+
+The chance that a pilot crossing a 1 km cell finds a climb (30 s or more climbing), from height on arrival, terrain, sun on the slopes and ERA5. 4,000,000 crossings sampled from 18.6 M (286 sites, 2,673 tasks); base rate 20.3%. Scored on sites left out (5 folds).
+
+| Features | AUC | Log-loss skill | Brier |
+|---|---|---|---|
+| pilot + terrain (15) | 0.654 | +4.8% | 0.1540 |
+| + sun (19) | 0.662 | +5.4% | 0.1531 |
+| + weather (51) | 0.671 | +5.9% | 0.1523 |
+
+- Calibration on held-out sites is close to exact: predicted 5.0% → observed 5.7%, 20.1% → 21.0%, 38.6% → 38.1%.
+- The climb rate when there is a climb is hard to predict per crossing: R² 0.095, mean error 0.55 m/s (mean 1.65 m/s, 810,296 climbs).
+- Most used: height on arrival (25.8%), topographic position at 5 and 20 km (17%), height as a share of the usable boundary layer (6.4%), relief, solar hour, ridges, albedo, soil moisture.
+
+Reading: per crossing, whether a pilot climbs depends as much on the pilot (how low they are, whether they need a climb, whether others are already circling) as on the air, so the gains from each group are small even though each is real. The weather sets the *day* (the ceiling result above), the terrain sets *where*. Next version: a label that removes the pilot's choice (crossings low enough to be searching; cells by day rather than by crossing), gaggles as a feature, ERA5-Land at 0.1°, and day-level models of ceiling and climb rate.
+
+Web data: 34,692 cells with 20+ crossings at 247 sites (1.2 MB).

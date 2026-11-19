@@ -16,6 +16,7 @@ The Meet Director always makes the decision; the tool only advises.
 - **Weather:** hourly ERA5 (surface, pressure levels, ground and air mass) and ERA5-Land for every site and competition day.
 - **Pilots:** an Elo rating before every task; the pilot rated higher placed better in 72.8% of pairs.
 - **Task baseline without weather:** winner's time within 18 min, goal share within 20 points (simple rules: 22 min, 26 points). The weather has to beat this.
+- **Thermals:** ERA5's boundary layer tells a high day from a low one at the same site (day-to-day correlation with the pilots' ceiling 0.64 over 136 sites). Per cell crossing, the first thermal model is well calibrated but modest (AUC 0.67 on sites it never saw): whether a pilot climbs depends a lot on the pilot.
 - **Wind:** ERA5's prevailing wind agrees with what pilots measured in their thermals to 16° in direction (74% within 30°); near the ground, where the terrain takes over, only 63%.
 
 The full log, step by step: [docs/results.md](docs/results.md).
