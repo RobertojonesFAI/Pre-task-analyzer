@@ -284,7 +284,7 @@ def main():
     wx = weather(args.db, t)
     t = t.merge(wx, left_on="task_key", right_index=True, how="left")
     print(f"{len(t):,} tasks ({t['winner_kmh'].notna().sum():,} with a winner's time); weather for "
-          f"{t['blh_mean'].notna().mean():.0%}, along the route for {t['has_route'].fillna(False).astype(bool).mean():.0%} "
+          f"{t['blh_mean'].notna().mean():.0%}, along the route for {t['has_route'].eq(True).mean():.0%} "
           f"(the others: the competition area)", flush=True)
     t[["task_key"] + WEATHER].to_parquet(out / "features.parquet", index=False)
 

@@ -2,7 +2,7 @@
 
 What each step has produced on the full database, in the order the notebooks run. Numbers are copied from the notebooks' output; `results/` holds the statistics and maps generated from the database itself (notebook 12). Both are refreshed every 10 to 15 commits.
 
-Last update: 18 November 2026 (09 added).
+Last update: 18 November 2026 (09 and 13 added).
 
 ## Database
 
@@ -102,3 +102,21 @@ The chance that a pilot crossing a 1 km cell finds a climb (30 s or more climbin
 Reading: per crossing, whether a pilot climbs depends as much on the pilot (how low they are, whether they need a climb, whether others are already circling) as on the air, so the gains from each group are small even though each is real. The weather sets the *day* (the ceiling result above), the terrain sets *where*. Next version: a label that removes the pilot's choice (crossings low enough to be searching; cells by day rather than by crossing), gaggles as a feature, ERA5-Land at 0.1°, and day-level models of ceiling and climb rate.
 
 Web data: 34,692 cells with 20+ crossings at 247 sites (1.2 MB).
+
+## Task model v1 with weather (13)
+
+The same 2,099 tasks (1,811 with a winner's time) as the baseline, with the weather of the day along the route during the task (96% of tasks have weather; 79% along their real route, the rest over the competition area). Both models scored on the same folds.
+
+| | Without weather | With weather |
+|---|---|---|
+| Winner's time, new competition | 18 min | **17 min** |
+| within 15 min | 53% | **58%** |
+| within 30 min | 83% | **86%** |
+| Winner's speed, new competition | 4.9 km/h | **4.4 km/h** |
+| Winner's time, new site | 20 min | **18 min** |
+| Goal share, new competition | 19.6 points | 19.0 points |
+| Goal share, new site | 20.7 points | 20.5 points |
+
+- The weather improves the winner's speed by about 10% (4.9 to 4.4 km/h) and puts 58% of tasks within 15 minutes. What it uses most is the **wind along the route**: tailwind at 100 m and at 700 hPa come right after the site's history, then the boundary layer and the lapse rate.
+- The goal share barely moves. The committee already set each task for the forecast it had (longer tasks on better days), so the distance carries much of the weather; what is left depends on the pilots and on local conditions that 0.25° ERA5 averaged over five hours does not see.
+- Next: predict each pilot's result (goal or not, time) from the pilot's rating and glider and the weather, and add them up into the goal share: 173,280 results to learn from instead of 2,099 tasks. Also the weather by hour along the route (how the day develops), the wind at the pilots' height, and the thermal model's predictions along the legs.
