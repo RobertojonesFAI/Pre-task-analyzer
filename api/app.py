@@ -57,8 +57,8 @@ def evaluate(trees, x):
 @app.on_event("startup")
 def load():  # noqa: D401  (FastAPI startup hook)
     t0 = time.time()
-    STATE["model"] = json.loads((WEB / "task_model.json").read_text())
-    STATE["sites"] = {s["id"]: s for s in json.loads((WEB / "sites.json").read_text())}
+    STATE["model"] = json.loads((WEB / "task_model.json").read_text(encoding="utf-8"))
+    STATE["sites"] = {s["id"]: s for s in json.loads((WEB / "sites.json").read_text(encoding="utf-8"))}
     STATE["tables"] = TM.load_tables(DB)
     STATE["loaded_s"] = round(time.time() - t0, 1)
 
@@ -68,7 +68,7 @@ def site_tasks(site_id):
     p = WEB / "tasks" / f"{site_id}.json"
     if not p.exists():
         raise HTTPException(404, f"no tasks for site {site_id}")
-    return json.loads(p.read_text())
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 @app.get("/health")
