@@ -321,6 +321,12 @@ def main():
     tk = pd.read_parquet(args.db / "tasks.parquet", columns=["task_key", "name"]).rename(columns={"name": "task"})
     w = t.merge(preds[["task_key", "pred_winner_kmh", "pred_goal_share", "base_winner_kmh", "base_goal_share"]], on="task_key", how="left")
     w = w.merge(events, on="event_key", how="left").merge(tk, on="task_key", how="left")
+    route = {}
+    if (args.db / "turnpoints.parquet").exists():   # cylinders to draw the task on the map
+        tp = pd.read_parquet(args.db / "turnpoints.parquet", columns=["task_key", "seq", "lat", "lon", "radius_m", "type"])
+        tp = tp[tp["task_key"].isin(w["task_key"])].dropna(subset=["lat", "lon"]).sort_values(["task_key", "seq"])
+        route = {k: [[round(float(r.lat), 5), round(float(r.lon), 5), int(r.radius_m) if pd.notna(r.radius_m) else 0,
+                      str(r.type or "")] for r in g.itertuples(index=False)] for k, g in tp.groupby("task_key")}
     n_sites = 0
     for site, g in w.groupby("site_id"):
         g = g.sort_values("date", ascending=False)
@@ -334,6 +340,7 @@ def main():
                          "pred_goal": None if pd.isna(r.pred_goal_share) else round(float(r.pred_goal_share), 3),
                          "base_kmh": None if pd.isna(r.base_winner_kmh) else round(float(r.base_winner_kmh), 2),
                          "base_goal": None if pd.isna(r.base_goal_share) else round(float(r.base_goal_share), 3),
+                         "route": route.get(r.task_key, []),
                          "x": [None if pd.isna(v) else round(float(v), 4) for v in (getattr(r, f) for f in full)]})
         (web / "tasks" / f"{site}.json").write_text(json.dumps({"features": full, "tasks": rows}, separators=(",", ":"),
                                                                ensure_ascii=False))

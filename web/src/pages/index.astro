@@ -15,7 +15,7 @@ import "../styles/global.css";
     <aside class="panel" id="panel">
       <header class="brand">
         <h1>Pre-task Analyzer</h1>
-        <p class="lede">Where competition pilots find thermals: every crossing of a 1 km cell, from their tracks, the terrain and the weather.</p>
+        <p class="lede">Where competition pilots find thermals, and how hard a task will be: from 150,000 competition flights, the terrain and the weather.</p>
       </header>
 
       <section class="tiles" id="tiles" aria-label="Totals">
@@ -38,6 +38,7 @@ import "../styles/global.css";
         <h2 id="s-name"></h2>
         <p class="meta" id="s-meta"></p>
         <dl class="facts" id="s-facts"></dl>
+        <section class="tasks-box" id="tasks-box" hidden></section>
       </section>
 
       <section class="list" id="list-wrap">
@@ -47,6 +48,7 @@ import "../styles/global.css";
         <ol class="sites" id="sites"></ol>
       </section>
 
+      <p class="model-note" id="model-note" hidden></p>
       <footer class="foot" id="foot"></footer>
     </aside>
 

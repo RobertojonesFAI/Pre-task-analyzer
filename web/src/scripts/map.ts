@@ -1,6 +1,7 @@
 import * as maplibregl from "maplibre-gl";
 // the map's web worker is its own file: let the bundler copy it and tell MapLibre where it is
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
+import { loadTaskModel, modelSummary, onTaskSelect, renderTasks } from "./tasks";
 
 maplibregl.setWorkerUrl(workerUrl);
 
@@ -125,7 +126,32 @@ async function selectSite(map: maplibregl.Map, s: Site) {
     src.setData({ type: "FeatureCollection", features: [] });
   }
   $("s-facts").innerHTML = facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+  renderTasks(s.id, $("tasks-box"));
   map.fitBounds([[s.box[0], s.box[1]], [s.box[2], s.box[3]]], { padding: 40, duration: 900 });
+}
+
+/** A task drawn on the map: the line between cylinder centres and each cylinder. */
+function routeGeo(route: [number, number, number, string][] | null): GeoJSON.FeatureCollection {
+  if (!route) return { type: "FeatureCollection", features: [] };
+  const circle = (lat: number, lon: number, r: number): GeoJSON.Position[] => {
+    const pts: GeoJSON.Position[] = [];
+    const dLat = r / 111320, dLon = r / (111320 * Math.cos((lat * Math.PI) / 180));
+    for (let k = 0; k <= 48; k++) {
+      const a = (k / 48) * 2 * Math.PI;
+      pts.push([lon + dLon * Math.cos(a), lat + dLat * Math.sin(a)]);
+    }
+    return pts;
+  };
+  return {
+    type: "FeatureCollection",
+    features: [
+      { type: "Feature", properties: { kind: "line" }, geometry: { type: "LineString", coordinates: route.map(([la, lo]) => [lo, la]) } },
+      ...route.filter(([, , r]) => r > 0).map(([la, lo, r, ty]) => ({
+        type: "Feature" as const, properties: { kind: "cyl", type: ty },
+        geometry: { type: "Polygon" as const, coordinates: [circle(la, lo, r)] },
+      })),
+    ],
+  };
 }
 
 function backToAll(map: maplibregl.Map) {
@@ -135,6 +161,7 @@ function backToAll(map: maplibregl.Map) {
   $("list-wrap").hidden = false;
   $("legend").hidden = true;
   (map.getSource("cells") as maplibregl.GeoJSONSource).setData({ type: "FeatureCollection", features: [] });
+  (map.getSource("route") as maplibregl.GeoJSONSource | undefined)?.setData(routeGeo(null));
   allSites();
 }
 
@@ -173,6 +200,10 @@ export async function start() {
       : "") + `Cells with ${summary.min_crossings}+ crossings. Aggregates only, no pilot data.`;
   }
   if (!sites.length) $("empty").hidden = false;
+  loadTaskModel().then((m) => {
+    const note = m ? modelSummary(m) : "";
+    if (note) { $("model-note").innerHTML = note; $("model-note").hidden = false; }
+  });
 
   // the basemap is optional: without it (offline, blocked) the data still shows on a plain background
   const style = await fetch(STYLE).then((r) => (r.ok ? STYLE : FALLBACK)).catch(() => FALLBACK);
@@ -192,6 +223,18 @@ export async function start() {
     map.addSource("cells", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     map.addLayer({ id: "cells-fill", type: "fill", source: "cells",
       paint: { "fill-color": colorExpr(layer), "fill-opacity": 0.78 } });
+    map.addSource("route", { type: "geojson", data: routeGeo(null) });
+    map.addLayer({ id: "route-cyl", type: "line", source: "route", filter: ["==", ["get", "kind"], "cyl"],
+      paint: { "line-color": "#1d4f99", "line-width": 1.5, "line-dasharray": [2, 1] } });
+    map.addLayer({ id: "route-line", type: "line", source: "route", filter: ["==", ["get", "kind"], "line"],
+      paint: { "line-color": "#1d4f99", "line-width": 2.5 } });
+    onTaskSelect((route) => {
+      (map.getSource("route") as maplibregl.GeoJSONSource).setData(routeGeo(route ?? null));
+      if (route && route.length) {
+        const la = route.map((p) => p[0]), lo = route.map((p) => p[1]);
+        map.fitBounds([[Math.min(...lo), Math.min(...la)], [Math.max(...lo), Math.max(...la)]], { padding: 60, duration: 800 });
+      }
+    });
     map.addSource("sites", { type: "geojson", data: sitesGeo(sites) });
     map.addLayer({ id: "sites-dot", type: "circle", source: "sites",
       paint: {
