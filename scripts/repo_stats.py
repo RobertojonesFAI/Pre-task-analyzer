@@ -253,7 +253,7 @@ def markdown(s, sites, n_cells):
     labels = [("competitions", "Competitions"), ("tasks", "Tasks"), ("tasks_with_results", "Tasks with results"),
               ("results", "Results"), ("pilots", "Pilots"), ("tracks", "IGC tracks"), ("unique_tracks", "Unique tracks"),
               ("flights", "Unique flights"), ("drives", "Drives found (not flights)"), ("sites", "Sites"),
-              ("site_chips", "Site chips"), ("cells", "1 km cells"), ("climbs", "Climbs"), ("glides", "Glides"),
+              ("site_chips", "Site-chip pairs (a chip can serve several sites)"), ("cells", "1 km cells"), ("climbs", "Climbs"), ("glides", "Glides"),
               ("crossings", "Cell crossings"), ("thermals", "Thermals"), ("landings", "Landings")]
     lines += [f"| {lab} | {fmt(t[k])} |" for k, lab in labels if t.get(k) is not None]
     if "flight_medians" in s:
