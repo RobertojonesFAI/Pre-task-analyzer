@@ -1,19 +1,18 @@
-// Task planner: set a competition task on the map for a past day (turnpoints, cylinders, start and
-// deadline), import it from instruments' files or an XCTrack QR code, export it back to them, and
-// ask the API what the task model predicts for it with that day's weather and pilots.
+// Task planner: set a competition task on the map (turnpoints, cylinders, start and deadline),
+// import it from instruments' files or an XCTrack QR code, export it back to them, and ask the API
+// what the task model predicts for it with the weather and pilots of a competition day at the site.
 
 import * as maplibregl from "maplibre-gl";
 import QRCode from "qrcode";
 import * as X from "./xctask";
 import { API, apiAvailable, predictRoute } from "./api";
 
-export type PlanContext = {
-  site: { id: string; name: string; lat: number; lon: number };
-  template: {
-    key: string; date: string; competition: string | null; task: string | null; km: number | null;
-    pred_kmh: number | null; pred_goal: number | null; route?: [number, number, number, string][];
-  };
+/** A past competition day at the site: its weather and pilots are what a new task is predicted with. */
+export type Day = {
+  key: string; date: string; competition: string | null; task: string | null; km: number | null;
+  pred_kmh: number | null; pred_goal: number | null; route?: [number, number, number, string][];
 };
+export type PlanContext = { site: { id: string; name: string; lat: number; lon: number }; days: Day[] };
 type SiteWaypoints = {
   waypoints: [string, number, number, number | null][];
   tasks: Record<string, { tps: [number, number, string][]; start: string | null; deadline: string | null; utc: number | null }>;
@@ -28,7 +27,9 @@ const SNAP_PX = 12;
 let map: maplibregl.Map | null = null;
 let markers: maplibregl.Marker[] = [];
 let el: HTMLElement | null = null;
+let root: HTMLElement | null = null;   // the planner's section; `el` is set while it is open
 let ctx: PlanContext | null = null;
+let day: Day | null = null;
 let task: X.Task = X.emptyTask();
 let dist: X.Distances | null = null;
 let adding = false;
@@ -78,11 +79,11 @@ function siteWaypoints(id: string): Promise<SiteWaypoints | null> {
   return cache.get(id)!;
 }
 
-/** The task as it was set, from the waypoints file (names, radii, times) or the route drawn on the page. */
-async function templateTask(c: PlanContext): Promise<X.Task | null> {
-  const w = await siteWaypoints(c.site.id);
-  const def = w?.tasks[c.template.key];
-  utc = def?.utc ?? Math.round(c.site.lon / 15);
+/** A day's task as it was set, from the waypoints file (names, radii, times) or the route on the page. */
+async function templateTask(site: PlanContext["site"], d: Day): Promise<X.Task | null> {
+  const w = await siteWaypoints(site.id);
+  const def = w?.tasks[d.key];
+  utc = def?.utc ?? Math.round(site.lon / 15);
   if (w && def && def.tps.length >= 2) {
     return {
       ...X.emptyTask(),
@@ -94,7 +95,7 @@ async function templateTask(c: PlanContext): Promise<X.Task | null> {
       deadline: def.deadline ? toUtc(def.deadline) : null,
     };
   }
-  const route = c.template.route || [];
+  const route = d.route || [];
   if (route.length < 2) return null;
   return {
     ...X.emptyTask(),
@@ -249,36 +250,77 @@ function fit() {
 // ---------------------------------------------------------------------------------------------
 // Panel
 
-/** Opens the planner in a task card (collapsed until asked for). */
-export function openPlanner(box: HTMLElement, c: PlanContext) {
+const dayLabel = (d: Day) => `${d.date} · ${d.competition || ""}${d.task ? ` · ${d.task}` : ""}`;
+
+/** Shows the planner for a site, open, with its competition days to predict with (latest first). */
+export function mountPlanner(box: HTMLElement, c: PlanContext) {
   closePlanner();
-  ctx = c;
-  tplSS = tplGate = null;
+  root = box;
+  ctx = { ...c, days: [...c.days].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)) };
+  utc = Math.round(c.site.lon / 15);
+  box.hidden = false;
+  setDay(ctx.days[0] ?? null);
+  expand();
+}
+
+/** Opens a past task in the planner, on its own day. */
+export async function planFrom(key: string) {
+  if (!ctx || !root) return;
+  const d = ctx.days.find((x) => x.key === key);
+  if (!d) return;
+  if (!el) expand();
+  await setDay(d);
+  if (el) $<HTMLSelectElement>("#p-day").value = d.key;
+  await loadDayTask();
+  root.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+/** The day's task as it was set, measured the same way as new ones, so an unchanged task predicts the same. */
+async function setDay(d: Day | null) {
+  day = d;
   tplTask = null;
-  box.innerHTML = `<div class="plan-head"><h4>Plan a task for this day</h4>
-      <button class="primary-sm" id="p-open">Open the planner</button></div>
-    <p class="hint">Same day, same weather and pilots: set the turnpoints and see what the task model predicts. Import and export tasks for XCTrack and other instruments.</p>`;
-  box.querySelector("#p-open")!.addEventListener("click", () => expand(box));
-  // the task as set, measured the same way as new ones, so an unchanged task predicts the same
-  templateTask(c).then((t) => {
-    if (ctx !== c || !t) return;
-    tplTask = t;
-    tplSS = X.distances(t).ssKm;
-    tplGate = t.gates[0] ?? null;
-  });
+  tplSS = tplGate = null;
+  if (!d || !ctx) return;
+  const c = ctx;
+  const t = await templateTask(c.site, d);
+  if (ctx !== c || day !== d) return;
+  tplTask = t;
+  tplSS = t ? X.distances(t).ssKm : null;
+  tplGate = t?.gates[0] ?? null;
+}
+
+async function loadDayTask() {
+  if (!ctx || !day) return;
+  const t = await templateTask(ctx.site, day);
+  if (!el) return;
+  if (!t) return msg("That day's task has no turnpoints on record.");
+  task = t;
+  insertAfter = -1;
+  setAdding(false);
+  changed(true);
+  fit();
+  msg(`${day.competition || "The task"}${day.task ? `, ${day.task}` : ""}, as it was set: change it, predict it or export it.`);
 }
 
 export function closePlanner() {
+  hide();
+  if (root) { root.innerHTML = ""; root.hidden = true; root.classList.remove("open"); }
+  root = null;
+  ctx = null;
+  day = null;
+  task = X.emptyTask();
+  dist = null;
+  extraWps = [];
+  siteWps = [];
+  insertAfter = -1;
+}
+
+/** Takes the planner off the map (its task is kept for when it opens again). */
+function hide() {
   markers.forEach((m) => m.remove());
   markers = [];
   el = null;
-  ctx = null;
   adding = false;
-  insertAfter = -1;
-  extraWps = [];
-  siteWps = [];
-  task = X.emptyTask();
-  dist = null;
   if (map) {
     showSetRoute(true);
     (map.getSource("plan") as maplibregl.GeoJSONSource | undefined)?.setData(EMPTY);
@@ -287,21 +329,33 @@ export function closePlanner() {
   }
 }
 
-/** The page's own drawing of the task as set: hidden while the planner draws its own. */
+function collapse() {
+  if (!root) return;
+  hide();
+  root.classList.remove("open");
+  root.innerHTML = `<div class="plan-head"><h3>Create a task</h3><button class="primary-sm" id="p-open">Open the planner</button></div>
+    <p class="hint">Set a task on the map, see what the task model predicts, and send it to XCTrack and other instruments.</p>`;
+  root.querySelector("#p-open")!.addEventListener("click", () => expand());
+}
+
+/** The page's own drawing of an opened task: shown only while the planner has no task of its own. */
 function showSetRoute(on: boolean) {
   for (const id of ["route-cyl", "route-line"]) if (map?.getLayer(id)) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
 }
 
-async function expand(box: HTMLElement) {
-  const c = ctx!;
+function expand() {
+  const box = root!, c = ctx!;
   el = box;
-  showSetRoute(false);
   box.classList.add("open");
-  box.innerHTML = `<div class="plan-head"><h4>Plan a task for this day</h4><button class="close" id="p-close" aria-label="Close the planner">✕</button></div>
-    <p class="hint">Click the map to add a turnpoint, or a waypoint of the site's competitions (dots). Drag turnpoints to move them;
-      click a number to add the next ones after it.</p>
+  const days = c.days.map((d) => `<option value="${esc(d.key)}"${d === day ? " selected" : ""}>${esc(dayLabel(d))}</option>`).join("");
+  box.innerHTML = `<div class="plan-head"><h3>Create a task</h3><button class="close" id="p-close" aria-label="Close the planner">✕</button></div>
+    <label class="day">Weather and pilots of
+      <select id="p-day"${c.days.length ? "" : " disabled"}>${days || "<option>no competition day on record here</option>"}</select></label>
+    <p class="hint">${c.days.length
+      ? "Until forecasts are in, a task is predicted with the weather and the pilots of a past competition day at this site."
+      : "No competition day on record at this site: tasks can be set and exported, not predicted."}</p>
     <div class="btns">
-      <button id="p-tpl">Start from this task</button>
+      <button id="p-tpl"${c.days.length ? "" : " disabled"}>That day's task</button>
       <button id="p-clear">Clear</button>
       <button id="p-add" aria-pressed="false">Add on the map</button>
       <label class="file-btn">Import…<input type="file" id="p-file" accept=".xctsk,.cup,.wpt,.gpx,.txt,.json,image/*"></label>
@@ -334,14 +388,14 @@ async function expand(box: HTMLElement) {
       <p class="hint">Scan it with XCTrack's task import, or another app that reads XCTrack task codes.</p>
     </div>`;
 
-  $("#p-close").addEventListener("click", () => { const b = box; const c2 = ctx!; closePlanner(); openPlanner(b, c2); });
-  $("#p-tpl").addEventListener("click", async () => {
-    const t = await templateTask(c);
-    if (!t) return msg("This task has no turnpoints on record.");
-    task = t; insertAfter = -1; setAdding(false); changed(true); fit();
-    msg(`The task as it was set${c.template.task ? ` (${c.template.task})` : ""}: change it, or export it.`);
+  $("#p-close").addEventListener("click", collapse);
+  $<HTMLSelectElement>("#p-day").addEventListener("change", async (e) => {
+    const d = c.days.find((x) => x.key === (e.target as HTMLSelectElement).value) ?? null;
+    await setDay(d);
+    if (el) changed(false);
   });
-  $("#p-clear").addEventListener("click", () => { task = { ...X.emptyTask(), gates: task.gates, deadline: task.deadline }; insertAfter = -1; setAdding(true); changed(true); msg(""); });
+  $("#p-tpl").addEventListener("click", loadDayTask);
+  $("#p-clear").addEventListener("click", () => { task = { ...X.emptyTask(), gates: task.gates, deadline: task.deadline }; insertAfter = -1; setAdding(true); changed(true); startMsg(); });
   $("#p-add").addEventListener("click", () => setAdding(!adding));
   $<HTMLInputElement>("#p-file").addEventListener("change", (e) => {
     const f = (e.target as HTMLInputElement).files?.[0];
@@ -372,23 +426,18 @@ async function expand(box: HTMLElement) {
   });
   $("#p-qr-copy").addEventListener("click", () => navigator.clipboard?.writeText(X.toQR(named())).then(() => msg("QR text copied.")));
 
-  const w = await siteWaypoints(c.site.id);
-  if (el !== box) return;
-  siteWps = (w?.waypoints || []).map(([name, lat, lon, alt]) => ({ name, desc: "", lat, lon, alt: alt ?? 0 }));
-  drawWaypoints();
-  // start from the task as it was set, when it is on record
-  const t = await templateTask(c);
-  if (el !== box) return;
-  if (t) {
-    task = t;
-    msg(`The task as it was set${c.template.task ? ` (${c.template.task})` : ""}: change it, or export it.`);
-  } else {
-    setAdding(true);
-    msg("Click the map to place the takeoff, then the start and the turnpoints.");
-  }
+  if (task.tps.length) { setAdding(false); msg(""); }
+  else { setAdding(true); startMsg(); }
   changed(true);
-  if (t) fit();
-  apiAvailable().then((ok) => { if (el === box && !ok) $("#p-go").title = "The prediction server is not reachable right now."; updateGo(); });
+  siteWaypoints(c.site.id).then((w) => {
+    if (el !== box) return;
+    siteWps = (w?.waypoints || []).map(([name, lat, lon, alt]) => ({ name, desc: "", lat, lon, alt: alt ?? 0 }));
+    drawWaypoints();
+  });
+}
+
+function startMsg() {
+  msg(`Click the map to place the takeoff, then the start, the turnpoints and the goal${siteWps.length || ctx?.days.length ? "; the dots are waypoints this site's competitions used" : ""}.`);
 }
 
 function setAdding(on: boolean) {
@@ -430,6 +479,7 @@ function changed(list: boolean) {
   if (!el) return;
   if (list) renderList();
   if (!dragging) drawMarkers();
+  showSetRoute(task.tps.length === 0);
   dist = task.tps.length >= 2 ? X.distances(task) : null;
   (map?.getSource("plan") as maplibregl.GeoJSONSource | undefined)?.setData(geometry());
   $<HTMLInputElement>("#p-start").value = toLocal(task.gates[0]);
@@ -463,8 +513,9 @@ async function updateGo() {
   const go = $<HTMLButtonElement>("#p-go");
   const ok = API ? await apiAvailable() : false;
   if (!el) return;
-  go.disabled = !(ok && task.tps.length >= 2 && !far());
-  go.title = !ok ? "The prediction server is not reachable right now." : far() ? "The task is too far from this site to predict it with this day's weather." : "";
+  go.disabled = !(ok && day && task.tps.length >= 2 && !far());
+  go.title = !day ? "No competition day on record at this site." : !ok ? "The prediction server is not reachable right now."
+    : far() ? "The task is too far from this site to predict it with this site's days." : "";
 }
 
 function renderList() {
@@ -537,8 +588,8 @@ function sameRoute(a: X.Task, b: X.Task): boolean {
 }
 
 async function runPredict() {
-  if (!ctx || !el || task.tps.length < 2) return;
-  const c = ctx, t = c.template;
+  if (!ctx || !el || !day || task.tps.length < 2) return;
+  const c = ctx, t = day;
   const go = $<HTMLButtonElement>("#p-go"), out = $("#p-out");
   go.disabled = true;
   out.innerHTML = `<p class="hint">Reading the weather of ${t.date} along your route…</p>`;
@@ -564,7 +615,7 @@ async function runPredict() {
     const asSet = t.pred_kmh && t.km ? t.km / t.pred_kmh : null;
     out.innerHTML = `<div class="whatif-out"><div><span class="lbl">Winner's time</span><b>${hm(j.winner_h)}</b></div>
         <div><span class="lbl">In goal</span><b>${pct(j.goal_share)}</b></div></div>
-      <p class="hint">For the task as it was set the model predicted ${hm(asSet)} and ${pct(t.pred_goal)}.
+      <p class="hint">With the weather and pilots of ${esc(t.date)}. For that day's task as it was set the model predicted ${hm(asSet)} and ${pct(t.pred_goal)}.
         ${j.ss_km} km speed section · boundary layer ${w.blh_mean == null ? "–" : Math.round(w.blh_mean)} m ·
         ${w.tailwind_700 == null ? "–" : `${w.tailwind_700 >= 0 ? "tailwind" : "headwind"} ${Math.abs(w.tailwind_700).toFixed(1)} m/s`} at 700 hPa ·
         ${w.route_chips ?? "–"} weather cells along the route.</p>`;
@@ -585,7 +636,7 @@ function apply(p: X.Parsed) {
     setAdding(false);
     changed(true);
     fit();
-    msg(`${task.tps.length} turnpoints from ${p.format}.${far() ? " It is far from this site: it can be exported, not predicted with this day." : ""}`);
+    msg(`${task.tps.length} turnpoints from ${p.format}.${far() ? " It is far from this site: it can be exported, not predicted with this site's days." : ""}`);
   } else if (p.waypoints.length) {
     setAdding(true);
     msg(`${p.waypoints.length} waypoints from ${p.format} (purple dots): click them on the map to add turnpoints.`);
@@ -644,7 +695,7 @@ function named(): X.Task {
 
 function fileBase(): string {
   const c = ctx!;
-  const s = `${c.site.name}-${c.template.date}`.normalize("NFKD").replace(/[^\w.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const s = `${c.site.name}${day ? `-${day.date}` : ""}`.normalize("NFKD").replace(/[^\w.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
   return `${s || "task"}-task`;
 }
 
