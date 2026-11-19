@@ -245,21 +245,52 @@ def download(job, weather, key, part=False):
 
 # ── Convert ──────────────────────────────────────────────────────────────────
 
-def _datasets(path):
+def _datasets(path, prep=None):
     """The netCDF datasets in a downloaded file (the CDS sends a zip when variables come from
-    several streams, even when asked for unarchived files)."""
+    several streams, even when asked for unarchived files). `prep` cuts each one down before it
+    is read into memory."""
     import tempfile
 
     import xarray as xr
 
+    def load(f):
+        with xr.open_dataset(f) as ds:
+            ds = prep(ds) if prep else ds
+            return None if ds is None else ds.load()
+
     if not zipfile.is_zipfile(path):
-        return [xr.load_dataset(path)]
-    out = []
-    with zipfile.ZipFile(path) as z, tempfile.TemporaryDirectory() as tmp:
-        for m in z.namelist():
-            if m.endswith(".nc"):
-                out.append(xr.load_dataset(z.extract(m, tmp)))
-    return out
+        out = [load(path)]
+    else:
+        out = []
+        with zipfile.ZipFile(path) as z, tempfile.TemporaryDirectory() as tmp:
+            for m in z.namelist():
+                if m.endswith(".nc"):
+                    out.append(load(z.extract(m, tmp)))
+    return [d for d in out if d is not None]
+
+
+def _sites_only(wanted_chips, dataset):
+    """A `prep` for _datasets: only the grid points inside the wanted chips (a regional box holds
+    far more points than the sites use)."""
+    import xarray as xr
+
+    wanted = np.fromiter(wanted_chips, np.int64)
+    digits = 1 if dataset == "land" else 2
+
+    def prep(ds):
+        lat_name = "latitude" if "latitude" in ds.dims else None
+        if lat_name is None:
+            return ds
+        la, lo = np.meshgrid(np.round(ds["latitude"].values, digits), np.round(ds["longitude"].values, digits),
+                             indexing="ij")
+        rows, cols = np.nonzero(np.isin(grid.chip_id(la, lo), wanted))
+        if not len(rows):
+            return None
+        ur, uc = np.unique(rows), np.unique(cols)
+        ds = ds.isel(latitude=ur, longitude=uc).load()      # the rows and columns that hold a wanted point
+        return ds.isel(latitude=xr.DataArray(np.searchsorted(ur, rows), dims="point"),
+                       longitude=xr.DataArray(np.searchsorted(uc, cols), dims="point"))
+    return prep
 
 
 def _tidy(ds, dataset):
@@ -309,7 +340,9 @@ TABLES = (*DATASETS, "extra")   # extra: only from ARCO-ERA5 (era5_arco.py --pro
 def _one_file(path, dataset, wanted_chips):
     """One raw CDS file as tidy rows of the wanted chips only (filtered right away: a file of a
     large regional box holds far more points than the sites use)."""
-    parts = [_tidy(ds, dataset) for ds in _datasets(path)]
+    parts = [_tidy(ds, dataset) for ds in _datasets(path, _sites_only(wanted_chips, dataset))]
+    if not parts:
+        return pd.DataFrame()
     df = parts[0]
     for p in parts[1:]:
         df = df.merge(p, on=["time", "latitude", "longitude"], how="outer")
