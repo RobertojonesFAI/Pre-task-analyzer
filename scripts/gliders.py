@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-BRANDS = ["woody valley", "kortel", "karpofly", "ozone", "gin", "gingliders", "advance", "niviuk", "flow", "flowparagliders", "axis", "macpara", "mac para",
+BRANDS = ["gin gliders", "woody valley", "kortel", "karpofly", "ozone", "gin", "gingliders", "advance", "niviuk", "flow", "flowparagliders", "axis", "macpara", "mac para",
           "skywalk", "triple seven", "777", "nova", "swing", "phi", "bgd", "dudek", "up", "u-turn", "uturn", "sol",
           "airdesign", "air design", "supair", "aircross", "icaro", "skyman", "ozone paragliders", "gradient",
           "porcher", "windtech", "independence", "firebird", "apco", "freex", "paratech", "papillon"]
@@ -41,7 +41,7 @@ CURATED = {
 }
 CLASSES = ["CCC", "EN-D", "EN-C", "EN-B", "EN-A"]
 TYPOS = {"iceapeak": "icepeak", "boomarang": "boomerang", "boomerag": "boomerang", "zeno 2": "zeno2"}
-ALIASES = {"icepeakxone": "xone", "xone": "xone"}   # the same wing under two names
+ALIASES = {"icepeakxone": "xone", "xr7": "xrated7"}   # the same model under two names
 
 
 def _parts(name):
@@ -108,6 +108,16 @@ def classify(results):
     r["declared"] = r["glider_cert"].map(cert)
     votes = r.dropna(subset=["declared"]).query("glider_key != ''")
     major = votes.groupby("glider_key")["declared"].agg(lambda x: x.value_counts().index[0])
+    # a name written more often after the wing than first is a harness, even where an entry put it first
+    as_harness, as_first = r["harness_key"].value_counts(), r["glider_key"].value_counts()
+    harnesses = {k for k, n in as_harness.items() if k and n > as_first.get(k, 0)}
+    major = major[~major.index.isin(harnesses)]
+    # "Submarine / Enzo 3": harness first. When only the second name is a known wing, swap them;
+    # when both are wings ("Enzo 3 / Photon", two wings in one entry) keep the first and no harness.
+    first_wing, second_wing = r["glider_key"].isin(major.index), r["harness_key"].isin(major.index)
+    swap = ~first_wing & second_wing & (r["harness_key"] != "")
+    r.loc[swap, ["glider_key", "harness_key"]] = r.loc[swap, ["harness_key", "glider_key"]].to_numpy()
+    r.loc[first_wing & second_wing, "harness_key"] = ""
     declared = r["glider_key"].map(major)
     curated = r["glider_key"].map(lambda k: CURATED.get(family(k)) or CURATED.get(k))
     r["glider_class"] = declared.where(declared.notna(), curated)
