@@ -1,0 +1,269 @@
+{
+ "updated": "2026-11-19",
+ "totals": {
+  "competitions": 848,
+  "tasks": 3114,
+  "tasks_with_results": 2325,
+  "results": 173280,
+  "pilots": 12495,
+  "tracks": 196975,
+  "unique_tracks": 165112,
+  "flights": 152930,
+  "sites": 291,
+  "site_chips": 8589,
+  "cells": 3913750,
+  "flight_checks": 152930,
+  "crossings": 18603747,
+  "thermals": 2959898,
+  "landings": 152930,
+  "climbs": 3718937,
+  "glides": 3856342,
+  "drives": 2173
+ },
+ "tracks_by_source": {
+  "airtribune": 79448,
+  "civlcomps": 64971,
+  "airscore": 12873,
+  "flymaster": 7820
+ },
+ "flight_medians": {
+  "hours": 2.56,
+  "thermals": 20.0,
+  "climb_ms": 1.47
+ },
+ "by_year": {
+  "2015": {
+   "flights": 383,
+   "tasks": 24,
+   "competitions": 11
+  },
+  "2016": {
+   "flights": 2634,
+   "tasks": 168,
+   "competitions": 38
+  },
+  "2017": {
+   "flights": 3467,
+   "tasks": 167,
+   "competitions": 47
+  },
+  "2018": {
+   "flights": 4507,
+   "tasks": 142,
+   "competitions": 42
+  },
+  "2019": {
+   "flights": 3253,
+   "tasks": 106,
+   "competitions": 32
+  },
+  "2020": {
+   "flights": 3742,
+   "tasks": 103,
+   "competitions": 26
+  },
+  "2021": {
+   "flights": 6452,
+   "tasks": 167,
+   "competitions": 39
+  },
+  "2022": {
+   "flights": 14643,
+   "tasks": 204,
+   "competitions": 51
+  },
+  "2023": {
+   "flights": 10488,
+   "tasks": 144,
+   "competitions": 39
+  },
+  "2024": {
+   "flights": 19930,
+   "tasks": 296,
+   "competitions": 79
+  },
+  "2025": {
+   "flights": 41926,
+   "tasks": 782,
+   "competitions": 216
+  },
+  "2026": {
+   "flights": 41505,
+   "tasks": 811,
+   "competitions": 233
+  }
+ },
+ "competitions_by_country": {
+  "?": 69,
+  "BRA": 66,
+  "FRA": 64,
+  "COL": 58,
+  "ESP": 56,
+  "ITA": 53,
+  "RUS": 32,
+  "USA": 26,
+  "MKD": 24,
+  "TUR": 24,
+  "AUT": 23,
+  "SLO": 22,
+  "AUS": 17,
+  "KOR": 17,
+  "LTU": 16,
+  "CHE": 15,
+  "SVN": 15,
+  "MEX": 14,
+  "ROU": 14,
+  "VEN": 13
+ },
+ "weather": {
+  "era5_single": {
+   "rows": 8014876,
+   "chips": 6270,
+   "days": 2083
+  },
+  "era5_levels": {
+   "rows": 2581720,
+   "chips": 6270,
+   "days": 2073
+  },
+  "era5_extra": {
+   "rows": 3964016,
+   "chips": 6270,
+   "days": 2083
+  },
+  "era5_land": {
+   "rows": 63561788,
+   "chips": 6249,
+   "days": 2084
+  },
+  "era5_static": {
+   "rows": 6270,
+   "chips": 6270
+  }
+ },
+ "glider_classes": {
+  "CCC": 0.3343,
+  "EN-C": 0.3333,
+  "EN-D": 0.2131,
+  "EN-B": 0.1174,
+  "EN-A": 0.0019
+ },
+ "glider_class_found": 0.9424,
+ "harness_written": 0.1385,
+ "ratings": {
+  "pilots": 12060,
+  "with_20_tasks": 2181,
+  "min": 999,
+  "median": 1477,
+  "max": 2366
+ },
+ "models": {
+  "thermal_v0": {
+   "climb": {
+    "pilot + terrain": {
+     "auc": 0.6544206895359362,
+     "log_loss": 0.47964628427841927,
+     "brier": 0.15401716620653205,
+     "log_loss_skill": 0.04829768054758987,
+     "features": 15
+    },
+    "+ sun": {
+     "auc": 0.6624899154553043,
+     "log_loss": 0.4767934687998742,
+     "brier": 0.15307281164556305,
+     "log_loss_skill": 0.05395816661178521,
+     "features": 19
+    },
+    "+ weather": {
+     "auc": 0.6706472085303263,
+     "log_loss": 0.47414011809046847,
+     "brier": 0.1522512201188522,
+     "log_loss_skill": 0.059222879603904155,
+     "features": 51
+    }
+   },
+   "climb_rate": {
+    "r2": 0.0949852742718853,
+    "mae_ms": 0.5455816343203949,
+    "n": 810296,
+    "mean_ms": 1.651105488076841
+   },
+   "ceiling": {
+    "chip_hours": 18251,
+    "median_ceiling_m": 1150.7574096679687,
+    "median_blh_m": 1516.1622314453125,
+    "corr_blh": 0.614012549729342,
+    "corr_cloud_base": 0.2463886423084845,
+    "sites_with_5_days": 136,
+    "median_within_site_corr": 0.6441350284322243
+   },
+   "rows": 3999996
+  },
+  "task_v0": {
+   "winner_kmh|new competition": {
+    "mae": 4.873383047538288,
+    "n": 1811,
+    "rule_overall_median": 6.076177240112045,
+    "rule_site_history": 5.579180980413719,
+    "model_where_site_history": 4.863516594913746,
+    "time_mae_min": 18.296657114757632,
+    "time_mae_min_rule": 22.45736803201762
+   },
+   "winner_kmh|new site": {
+    "mae": 5.190185055874202,
+    "n": 1811,
+    "rule_overall_median": 6.076177240112045,
+    "rule_site_history": 5.579180980413719,
+    "model_where_site_history": 5.2292372918536545,
+    "time_mae_min": 19.375886721417903,
+    "time_mae_min_rule": 22.45736803201762
+   },
+   "goal_share|new competition": {
+    "mae": 0.1962432250528005,
+    "n": 2099,
+    "rule_overall_median": 0.259687990395224,
+    "rule_site_history": 0.22683434815621792,
+    "model_where_site_history": 0.19608049871162558
+   },
+   "goal_share|new site": {
+    "mae": 0.20536748193188636,
+    "n": 2099,
+    "rule_overall_median": 0.259687990395224,
+    "rule_site_history": 0.22683434815621792,
+    "model_where_site_history": 0.20672605313817874
+   }
+  },
+  "wind_check": {
+   "bands": {
+    "near the ground": {
+     "groups": 12121,
+     "measurements": 582823,
+     "vector_error_ms": 1.752092803694649,
+     "speed_bias_ms": -0.49705821657823246,
+     "speed_corr": 0.39252116278512755,
+     "dir_error_deg": 21.5231641297043,
+     "dir_within_30": 0.6325999526851195
+    },
+    "middle": {
+     "groups": 10988,
+     "measurements": 629250,
+     "vector_error_ms": 1.8105507265384118,
+     "speed_bias_ms": -0.46016492788123275,
+     "speed_corr": 0.44748037696374543,
+     "dir_error_deg": 21.901969589590294,
+     "dir_within_30": 0.6353728015853356
+    },
+    "free air": {
+     "groups": 11783,
+     "measurements": 771609,
+     "vector_error_ms": 1.752321285665148,
+     "speed_bias_ms": -0.6489263689171122,
+     "speed_corr": 0.6073122290409617,
+     "dir_error_deg": 15.861070808489671,
+     "dir_within_30": 0.742921270718232
+    }
+   },
+   "has_levels": true
+  }
+ }
+}

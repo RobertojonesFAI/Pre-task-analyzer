@@ -19,7 +19,9 @@ The Meet Director always makes the decision; the tool only advises.
 - **Thermals:** ERA5's boundary layer tells a high day from a low one at the same site (day-to-day correlation with the pilots' ceiling 0.64 over 136 sites). Per cell crossing, the first thermal model is well calibrated but modest (AUC 0.67 on sites it never saw): whether a pilot climbs depends a lot on the pilot.
 - **Wind:** ERA5's prevailing wind agrees with what pilots measured in their thermals to 16° in direction (74% within 30°); near the ground, where the terrain takes over, only 63%.
 
-The full log, step by step: [docs/results.md](docs/results.md).
+The full log, step by step: [docs/results.md](docs/results.md). Statistics of the database and maps: [results/STATS.md](results/STATS.md), with interactive maps of the [sites](results/sites.geojson), the [weather chips](results/chips.geojson) and the [cells crossed most often](results/thermal_cells.geojson).
+
+![Competition sites and their weather chips in Europe, shaded by flights](results/coverage_europe.png)
 
 ## How it works
 
