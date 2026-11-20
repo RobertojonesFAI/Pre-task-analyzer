@@ -1,6 +1,8 @@
 // The API (the OptiPlex, behind a Cloudflare Tunnel) re-plans a task with a new route. Its address
-// comes from PUBLIC_API_URL at build time, or ?api= in the page address; without it the page works alone.
-export const API = (new URLSearchParams(location.search).get("api") || import.meta.env.PUBLIC_API_URL || "").replace(/\/$/, "");
+// is ?api= in the page address, else PUBLIC_API_URL at build time, else the project's own API.
+// PUBLIC_API_URL="" builds a page that works alone, without the API.
+const DEFAULT_API = "https://api.xcmeteo.com";
+export const API = (new URLSearchParams(location.search).get("api") ?? import.meta.env.PUBLIC_API_URL ?? DEFAULT_API).replace(/\/$/, "");
 
 let ok: Promise<boolean> | null = null;
 export function apiAvailable(): Promise<boolean> {
