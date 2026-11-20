@@ -2,9 +2,9 @@
 
 A static site (Astro + MapLibre GL) with a map of the competition sites and, per site:
 
-- where pilots circled in thermals, at about 200 m: every thermal of the competition flights in its cell, drawn as a heat map that follows the cells at every zoom (relative to the site's busiest cells), and each cell's thermals, flights, mean climb and median top on hover when zoomed in (`scripts/export_hotspots.py`);
+- where pilots circled in thermals, at about 200 m: every thermal of the competition flights snapped to a square mosaic grid of ~200 m cells with 7 discrete terracotta steps (relative to the site's busiest cells), subtle per-step borders and a high-contrast outline with each cell's thermals, flights, mean climb and median top on hover (`scripts/export_hotspots.py`);
 - the relief: a hillshade, and a 3D view (the "3D" button; tilt and turn with the right mouse button or two fingers) with the thermals, the cells and the task draped on the terrain. Elevations from the free [Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) on AWS Open Data;
-- the 1 km cells pilots crossed, coloured by how often they found a climb there (observed) or by what the thermal model predicts; hovering a cell shows its crossings, both shares and the mean climb rate;
+- the 1 km cells pilots crossed, drawn in the same discrete mosaic grid style, coloured by how often they found a climb there (observed) or by what the thermal model predicts; hovering a cell highlights it and shows its crossings, both shares and the mean climb rate;
 - the site's past tasks: the route on the map, the weather along it, and the winner's time and goal share the task model predicted without having seen that competition, next to what happened;
 - "what if": change a task's distance or start time and see the prediction move. The task model runs in the browser (`task_model.json`, LightGBM trees as nested arrays), so the site needs no server;
 - the task planner (below).
@@ -48,6 +48,8 @@ python ../scripts/export_waypoints.py --db "G:/My Drive/IGCS/database" --web pub
 python ../scripts/export_hotspots.py --db "G:/My Drive/IGCS/database" --web public/data
 npm run dev          # http://localhost:4321
 ```
+
+When `public/data/` is not present locally, `npm run dev` automatically proxies `/data` from `https://pta.xcmeteo.com` (override with `DATA_ORIGIN=...`, or set `DATA_ORIGIN=` to disable), so UI changes can be previewed with real site data before deploying. Production builds (`npm run build`) are unaffected.
 
 ## Publish on Cloudflare Pages
 

@@ -31,7 +31,7 @@ import "../styles/global.css";
           <button role="radio" aria-checked="false" data-layer="climb_pct">Climb %</button>
           <button role="radio" aria-checked="false" data-layer="predicted_pct">Model</button>
         </div>
-        <p class="hint" id="layer-hint">Where pilots circled in thermals: cells of about 200 m with thermals from at least two flights. Zoom in for each cell's climb rate and height.</p>
+        <p class="hint" id="layer-hint">Where pilots circled in thermals: ~200 m grid cells with thermals from at least two flights. Hover a cell for its climb rate and height.</p>
       </section>
 
       <section class="site" id="site" hidden>
@@ -58,7 +58,7 @@ import "../styles/global.css";
       <div id="map" aria-label="Map of sites and thermal cells"></div>
       <div class="legend" id="legend" hidden>
         <div class="legend-title" id="legend-title">Thermals found</div>
-        <div class="legend-bar"></div>
+        <div class="legend-bar" id="legend-bar" aria-hidden="true"></div>
         <div class="legend-scale" id="legend-scale"><span>few</span><span></span><span></span><span>many</span></div>
       </div>
       <div class="tip" id="tip" hidden></div>
