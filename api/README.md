@@ -1,14 +1,32 @@
 # API
 
-A small FastAPI service that re-plans a past task with a new route: same day, same pilots, the
-route a committee draws on the web page. It reads ERA5 along the new route in the task's window,
-exactly as `scripts/task_model.py` does for training, and returns the task model's winner's time and
-goal share. The web page works without it (the task planner still imports and exports tasks); with it,
-the planner predicts the tasks set on it.
+A small FastAPI service that evaluates a task drawn on the web page with either:
 
-`POST /predict` takes `{"site", "template" (the day's task_key), "route": [[lat, lon, radius_m], ...],
-"ss_km", "start_solar_h"}`. The page sends the route's optimized speed-section distance (`ss_km`), measured
-from the cylinders as the official one is, and a start time only when it differs from the day's.
+- **Past competition day (ERA5):** same day, same pilots, a new route and start time, reading ERA5
+  along the route exactly as `scripts/task_model.py` does for training.
+- **Live weather forecast (Open-Meteo):** future dates (today through +6 days) using one or more
+  forecast models (`ecmwf_ifs`, `ecmwf_aifs`, `gfs`, `icon`, `gem`, plus regional models where
+  covered: `rrfs`, `hrdps`, `icon_d2`, `icon_eu`, `arome`), returning each model's prediction and a
+  median/mean blend with min–max range (`api/forecast.py`, 1 h per-chip cache). Pilots and ratings
+  are taken from the selected past competition day as a template.
+
+The web page works without it (the task planner still imports and exports tasks); with it, the
+planner predicts the tasks set on it.
+
+Endpoints:
+- `GET /health`: loaded tables, sites and forecast model count.
+- `GET /forecast/models?site=<site_id>&date=<YYYY-MM-DD>`: forecast models covering the site, with
+  resolution, boundary-layer source (`native` or `parcel`) and whether each covers the chosen date.
+- `POST /predict`: takes `{"site", "template" (the day's task_key), "route": [[lat, lon, radius_m], ...],
+  "ss_km", "start_solar_h", "window_h", "weather": {"source": "era5" | "forecast", "date", "models", "weights"}}`.
+  The page sends the route's optimized speed-section distance (`ss_km`), measured from the cylinders
+  as the official one is.
+
+To check live Open-Meteo model coverage at sample sites:
+
+```powershell
+python -m api.forecast --probe
+```
 
 It runs on the OptiPlex (see [docs/deployment.md](../docs/deployment.md)) and is published through a
 Cloudflare Tunnel on the project's domain.
