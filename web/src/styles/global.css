@@ -103,8 +103,10 @@ body {
 }
 .legend-title { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
 .legend-bar {
-  height: 10px; border-radius: 4px;
-  background: linear-gradient(90deg, #fdeee6 0%, #fbd3bd 16.7%, #f6a982 33.3%, #f08455 50%, #eb6834 66.7%, #cf5222 83.3%, #a33e16 100%);
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px;
+}
+.legend-bar span {
+  height: 11px; border-radius: 2px; border: 1px solid transparent;
 }
 .legend-scale { display: flex; justify-content: space-between; color: var(--text-2); font-size: 11px; margin-top: 3px; font-variant-numeric: tabular-nums; }
 .tip {
