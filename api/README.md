@@ -66,15 +66,16 @@ Windows service (`cloudflared service install`, with the config in the system pr
 
 ## 4. Point the web page at it
 
-Build the page with the API's address:
+The page calls `https://api.xcmeteo.com` unless told otherwise, so a plain build is enough:
 
 ```powershell
 cd web
-$env:PUBLIC_API_URL = "https://api.example.com"
 npm run build
 npx wrangler pages deploy dist --project-name pre-task-analyzer
 ```
 
-Or, without rebuilding, open the page with `?api=https://api.example.com` in its address.
+To build it against another API, set `$env:PUBLIC_API_URL = "https://api.example.com"` before
+`npm run build` (an empty value builds a page that works without the API). Without rebuilding, open
+the page with `?api=https://api.example.com` in its address.
 
 `PTA_ORIGINS` (comma-separated) limits which sites may call the API; by default any.
