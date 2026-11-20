@@ -1,6 +1,10 @@
 import * as maplibregl from "maplibre-gl";
 // the map's web worker is its own file: let the bundler copy it and tell MapLibre where it is
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
+import {
+  CELL_STEPS, EMPTY_GEO, HOT_STEPS, type Hotspots,
+  cellsGeo, hotspotsGeo, stepColorExpr,
+} from "./grid";
 import { attachMap, closePlanner } from "./planner";
 import { addRelief } from "./terrain";
 import { loadTaskModel, modelSummary, onTaskSelect, renderTasks } from "./tasks";
@@ -18,22 +22,18 @@ type Summary = {
   climb_rate?: { r2?: number; mae_ms?: number };
 };
 type Layer = "thermals" | "climb_pct" | "predicted_pct";
-type Hotspots = { cols: string[]; rows: (number | null)[][] };
+type HoverTarget = { source: "cells" | "hotspots"; id: number };
 
 const STYLE = "https://tiles.openfreemap.org/styles/positron";
 const FALLBACK: maplibregl.StyleSpecification = {
   version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#e9ecef" } }],
 };
-const HALF = 0.005; // a cell is 0.01° on a side, centred on its point
-// one hue, light to dark: the share of crossings that found a climb
-const RAMP: [number, string][] = [
-  [0, "#fdeee6"], [12.5, "#fbd3bd"], [25, "#f6a982"], [37.5, "#f08455"],
-  [50, "#eb6834"], [62.5, "#cf5222"], [75, "#a33e16"],
-];
+const CELL_LAYERS = ["cells-fill", "cells-grid", "cells-hover-casing", "cells-hover"] as const;
+const HOT_LAYERS = ["hot-fill", "hot-grid", "hot-hover-casing", "hot-hover"] as const;
 const HINT: Record<Layer, string> = {
-  thermals: "Where pilots circled in thermals: cells of about 200 m with thermals from at least two flights. Zoom in for each cell's climb rate and height.",
-  climb_pct: "Share of pilots who found a climb when they crossed the 1 km cell.",
-  predicted_pct: "What the thermal model predicts for those same crossings, scored on sites it never saw.",
+  thermals: "Where pilots circled in thermals: ~200 m grid cells with thermals from at least two flights. Hover a cell for its climb rate and height.",
+  climb_pct: "Share of pilots who found a climb when they crossed each 1 km grid cell.",
+  predicted_pct: "What the thermal model predicts for those same 1 km grid cells, scored on sites it never saw.",
 };
 
 const $ = (id: string) => document.getElementById(id)!;
@@ -44,7 +44,26 @@ let layer: Layer = "thermals";     // the layer shown
 let chosen: Layer = "thermals";    // the one the user picked (thermals fall back to cells where there are none)
 let hasHotspots = false;
 let current: Site | null = null;
+let hovered: HoverTarget | null = null;
 let allSites = () => {};
+
+function setHovered(map: maplibregl.Map, next: HoverTarget | null) {
+  if (hovered && (!next || hovered.source !== next.source || hovered.id !== next.id)) {
+    if (map.getSource(hovered.source)) map.setFeatureState(hovered, { hover: false });
+  }
+  if (next && (!hovered || hovered.source !== next.source || hovered.id !== next.id)) {
+    if (map.getSource(next.source)) map.setFeatureState(next, { hover: true });
+  }
+  hovered = next;
+}
+
+function clearHover(map: maplibregl.Map, resetSources = false) {
+  setHovered(map, null);
+  if (resetSources) {
+    if (map.getSource("cells")) map.removeFeatureState({ source: "cells" });
+    if (map.getSource("hotspots")) map.removeFeatureState({ source: "hotspots" });
+  }
+}
 
 async function json<T>(url: string): Promise<T | null> {
   try {
@@ -55,11 +74,6 @@ async function json<T>(url: string): Promise<T | null> {
   }
 }
 
-function colorExpr(prop: Layer): maplibregl.ExpressionSpecification {
-  return ["case", ["==", ["get", prop], null], "rgba(0,0,0,0)",
-    ["interpolate", ["linear"], ["get", prop], ...RAMP.flat()]] as maplibregl.ExpressionSpecification;
-}
-
 function sitesGeo(list: Site[]): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
@@ -67,41 +81,6 @@ function sitesGeo(list: Site[]): GeoJSON.FeatureCollection {
       type: "Feature", id: list.indexOf(s),
       geometry: { type: "Point", coordinates: [s.lon, s.lat] },
       properties: { id: s.id, name: s.name, country: s.country, flights: s.flights, events: s.events },
-    })),
-  };
-}
-
-function cellsGeo(cols: string[], rows: (number | null)[][]): GeoJSON.FeatureCollection {
-  const i = Object.fromEntries(cols.map((c, k) => [c, k]));
-  return {
-    type: "FeatureCollection",
-    features: rows.map((r) => {
-      const lat = r[i.lat] as number, lon = r[i.lon] as number;
-      return {
-        type: "Feature",
-        geometry: { type: "Polygon", coordinates: [[[lon - HALF, lat - HALF], [lon + HALF, lat - HALF],
-          [lon + HALF, lat + HALF], [lon - HALF, lat + HALF], [lon - HALF, lat - HALF]]] },
-        properties: { crossings: r[i.crossings], climb_pct: r[i.climb_pct], predicted_pct: r[i.predicted_pct],
-          climb_ms: r[i.climb_ms] },
-      };
-    }),
-  };
-}
-
-/** Hotspot cells as points; `w` (0–1) is how many flights climbed there, on a log scale, relative to
- * the site's busiest cells (95th percentile), so every site uses the whole colour scale. */
-function hotspotsGeo(h: Hotspots | null): GeoJSON.FeatureCollection {
-  if (!h) return { type: "FeatureCollection", features: [] };
-  const i = Object.fromEntries(h.cols.map((c, k) => [c, k]));
-  const flights = h.rows.map((r) => (r[i.flights] as number) || 0).sort((a, b) => a - b);
-  const top = Math.log1p(Math.max(3, flights[Math.floor(0.95 * (flights.length - 1))] ?? 3));
-  return {
-    type: "FeatureCollection",
-    features: h.rows.map((r) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [r[i.lon] as number, r[i.lat] as number] },
-      properties: { thermals: r[i.thermals], flights: r[i.flights], climb_ms: r[i.climb_ms], top: r[i.top_agl_m],
-        w: Math.min(1, Math.max(0.25, Math.log1p((r[i.flights] as number) || 0) / top)) },
     })),
   };
 }
@@ -142,8 +121,10 @@ async function selectSite(map: maplibregl.Map, s: Site) {
     json<Hotspots>(`/data/hotspots/${s.id}.json`),
   ]);
   if (current !== s) return;
+  clearHover(map, true);
+  $("tip").hidden = true;
   hasHotspots = !!hot && hot.rows.length > 0;
-  (map.getSource("hotspots") as maplibregl.GeoJSONSource).setData(hotspotsGeo(hot));
+  (map.getSource("hotspots") as maplibregl.GeoJSONSource).setData(hotspotsGeo(hot, s.lat));
   setLayer(map, chosen === "thermals" && !hasHotspots ? "climb_pct" : chosen);
   if (hasHotspots) {
     const k = hot!.cols.indexOf("thermals");
@@ -159,7 +140,7 @@ async function selectSite(map: maplibregl.Map, s: Site) {
     facts.push(["Crossings", fmt.format(w)], ["Found a climb", w ? `${(sum / w).toFixed(0)}%` : "–"]);
     $("legend").hidden = false;
   } else {
-    src.setData({ type: "FeatureCollection", features: [] });
+    src.setData(EMPTY_GEO);
   }
   $("s-facts").innerHTML = facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
   renderTasks(s, $("tasks-box"), $("planner"));
@@ -196,8 +177,10 @@ function backToAll(map: maplibregl.Map) {
   $("site").hidden = true;
   $("list-wrap").hidden = false;
   $("legend").hidden = true;
-  (map.getSource("cells") as maplibregl.GeoJSONSource).setData({ type: "FeatureCollection", features: [] });
-  (map.getSource("hotspots") as maplibregl.GeoJSONSource).setData(hotspotsGeo(null));
+  clearHover(map, true);
+  $("tip").hidden = true;
+  (map.getSource("cells") as maplibregl.GeoJSONSource).setData(EMPTY_GEO);
+  (map.getSource("hotspots") as maplibregl.GeoJSONSource).setData(EMPTY_GEO);
   (map.getSource("route") as maplibregl.GeoJSONSource | undefined)?.setData(routeGeo(null));
   closePlanner();
   allSites();
@@ -211,6 +194,8 @@ const LEGEND: Record<Layer, [string, string[]]> = {
 
 function setLayer(map: maplibregl.Map, l: Layer) {
   layer = l;
+  clearHover(map);
+  $("tip").hidden = true;
   document.querySelectorAll<HTMLButtonElement>(".seg button").forEach((b) => {
     const on = b.dataset.layer === l;
     b.classList.toggle("on", on);
@@ -218,12 +203,20 @@ function setLayer(map: maplibregl.Map, l: Layer) {
   });
   $("layer-hint").textContent = l === "thermals" && current && !hasHotspots ? "No thermal hotspots exported for this site yet." : HINT[l];
   $("legend-title").textContent = LEGEND[l][0];
+  const steps = l === "thermals" ? HOT_STEPS : CELL_STEPS;
+  $("legend-bar").innerHTML = steps
+    .map(([, fill, border]) => `<span style="background:${fill};border-color:${border}"></span>`)
+    .join("");
   $("legend-scale").innerHTML = LEGEND[l][1].map((t) => `<span>${t}</span>`).join("");
   const vis = (id: string, on: boolean) => map.getLayer(id) && map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
-  vis("cells-fill", l !== "thermals");
-  vis("hot-heat", l === "thermals");
-  vis("hot-dot", l === "thermals");
-  if (l !== "thermals" && map.getLayer("cells-fill")) map.setPaintProperty("cells-fill", "fill-color", colorExpr(l));
+  for (const id of CELL_LAYERS) vis(id, l !== "thermals");
+  for (const id of HOT_LAYERS) vis(id, l === "thermals");
+  if (l !== "thermals") {
+    const notNull: maplibregl.FilterSpecification = ["!=", ["get", l], null];
+    for (const id of CELL_LAYERS) if (map.getLayer(id)) map.setFilter(id, notNull);
+    if (map.getLayer("cells-fill")) map.setPaintProperty("cells-fill", "fill-color", stepColorExpr(l, CELL_STEPS, "fill"));
+    if (map.getLayer("cells-grid")) map.setPaintProperty("cells-grid", "line-color", stepColorExpr(l, CELL_STEPS, "border"));
+  }
 }
 
 function showTip(e: maplibregl.MapMouseEvent, html: string) {
@@ -270,28 +263,59 @@ export async function start() {
   map.on("load", () => {
     if (!location.hash) fitAll(0);
     addRelief(map);
-    map.addSource("cells", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    const labels = map.getStyle().layers?.find((l) => l.type === "symbol")?.id;
+    // 1 km cells (Climb % and Model): mosaic squares with discrete steps, subtle borders and hover frame
+    map.addSource("cells", { type: "geojson", data: EMPTY_GEO, tolerance: 0 });
     map.addLayer({ id: "cells-fill", type: "fill", source: "cells",
-      paint: { "fill-color": colorExpr("climb_pct"), "fill-opacity": 0.72 } });
-    // thermal hotspots: a heat map whose blur follows the cells' spacing (about 220 m), so it reads as
-    // a smooth raster at every zoom; invisible dots on top answer the pointer with each cell's numbers
-    map.addSource("hotspots", { type: "geojson", data: hotspotsGeo(null) });
-    map.addLayer({ id: "hot-heat", type: "heatmap", source: "hotspots",
       paint: {
-        "heatmap-weight": ["get", "w"],
-        "heatmap-intensity": 0.9,
-        "heatmap-radius": ["interpolate", ["exponential", 2], ["zoom"], 8, 1, 16, 256],
-        "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"],
-          0, "rgba(251,211,189,0)", 0.05, "rgba(251,211,189,0.6)", 0.15, "rgba(246,169,130,0.85)", 0.3, "#f08455",
-          0.5, "#eb6834", 0.7, "#cf5222", 0.9, "#a33e16", 1, "#7f2f10"],
-        "heatmap-opacity": 0.85,
-      } });
-    map.addLayer({ id: "hot-dot", type: "circle", source: "hotspots", minzoom: 12,
+        "fill-color": stepColorExpr("climb_pct", CELL_STEPS, "fill"),
+        "fill-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 0.96, 0.84],
+        "fill-antialias": true,
+      } }, labels);
+    map.addLayer({ id: "cells-grid", type: "line", source: "cells",
       paint: {
-        "circle-radius": ["interpolate", ["exponential", 2], ["zoom"], 12, 3, 16, 48],
-        "circle-color": "#a33e16",
-        "circle-opacity": 0.01,
-      } });
+        "line-color": stepColorExpr("climb_pct", CELL_STEPS, "border"),
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.5, 11, 1.0, 14, 1.5],
+        "line-opacity": ["interpolate", ["linear"], ["zoom"], 7.5, 0, 8.5, 0.75],
+      } }, labels);
+    map.addLayer({ id: "cells-hover-casing", type: "line", source: "cells",
+      paint: {
+        "line-color": "#ffffff",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2.8, 13, 4.2],
+        "line-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 0.92, 0],
+      } }, labels);
+    map.addLayer({ id: "cells-hover", type: "line", source: "cells",
+      paint: {
+        "line-color": "#16150f",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1.4, 13, 2.2],
+        "line-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 1, 0],
+      } }, labels);
+    // ~200 m thermal hotspots: snapped square mosaic grid with 7 discrete terracotta steps and hover frame
+    map.addSource("hotspots", { type: "geojson", data: EMPTY_GEO, tolerance: 0 });
+    map.addLayer({ id: "hot-fill", type: "fill", source: "hotspots",
+      paint: {
+        "fill-color": stepColorExpr("w", HOT_STEPS, "fill"),
+        "fill-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 0.96, 0.84],
+        "fill-antialias": true,
+      } }, labels);
+    map.addLayer({ id: "hot-grid", type: "line", source: "hotspots",
+      paint: {
+        "line-color": stepColorExpr("w", HOT_STEPS, "border"),
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10.5, 0.4, 12.5, 0.9, 15, 1.4],
+        "line-opacity": ["interpolate", ["linear"], ["zoom"], 10, 0, 11.2, 0.72],
+      } }, labels);
+    map.addLayer({ id: "hot-hover-casing", type: "line", source: "hotspots",
+      paint: {
+        "line-color": "#ffffff",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2.6, 14, 4.0],
+        "line-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 0.92, 0],
+      } }, labels);
+    map.addLayer({ id: "hot-hover", type: "line", source: "hotspots",
+      paint: {
+        "line-color": "#16150f",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.3, 14, 2.1],
+        "line-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 1, 0],
+      } }, labels);
     setLayer(map, layer);
     map.addSource("route", { type: "geojson", data: routeGeo(null) });
     map.addLayer({ id: "route-cyl", type: "line", source: "route", filter: ["==", ["get", "kind"], "cyl"],
@@ -317,21 +341,25 @@ export async function start() {
       maxzoom: 8 });
 
     map.on("mousemove", "cells-fill", (e) => {
-      const p = e.features?.[0]?.properties as Record<string, number | null> | undefined;
+      const f = e.features?.[0];
+      const p = f?.properties as Record<string, number | null> | undefined;
       if (!p) return;
+      if (typeof f?.id === "number") setHovered(map, { source: "cells", id: f.id });
       const pct = (v: number | null) => (v == null ? "–" : `${Math.round(v)}%`);
       showTip(e, `<b>${fmt.format(p.crossings as number)}</b> crossings<br>Found a climb <b>${pct(p.climb_pct)}</b>` +
         `<br>Model <b>${pct(p.predicted_pct)}</b>` + (p.climb_ms != null ? `<br>Mean climb <b>${(p.climb_ms as number).toFixed(1)} m/s</b>` : ""));
     });
-    map.on("mouseleave", "cells-fill", () => ($("tip").hidden = true));
-    map.on("mousemove", "hot-dot", (e) => {
-      const p = e.features?.[0]?.properties as Record<string, number | null> | undefined;
+    map.on("mouseleave", "cells-fill", () => { setHovered(map, null); $("tip").hidden = true; });
+    map.on("mousemove", "hot-fill", (e) => {
+      const f = e.features?.[0];
+      const p = f?.properties as Record<string, number | null> | undefined;
       if (!p) return;
+      if (typeof f?.id === "number") setHovered(map, { source: "hotspots", id: f.id });
       showTip(e, `<b>${fmt.format(p.thermals as number)}</b> thermals from <b>${fmt.format(p.flights as number)}</b> flights` +
         (p.climb_ms != null ? `<br>Mean climb <b>${(p.climb_ms as number).toFixed(1)} m/s</b>` : "") +
         (p.top != null ? `<br>Top <b>${fmt.format(p.top as number)} m</b> above the ground` : ""));
     });
-    map.on("mouseleave", "hot-dot", () => ($("tip").hidden = true));
+    map.on("mouseleave", "hot-fill", () => { setHovered(map, null); $("tip").hidden = true; });
     map.on("mousemove", "sites-dot", (e) => {
       map.getCanvas().style.cursor = "pointer";
       const p = e.features?.[0]?.properties as Record<string, string | number>;
