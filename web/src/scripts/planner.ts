@@ -1,13 +1,22 @@
 // Task planner: set a competition task on the map (turnpoints, cylinders, start and deadline),
 // import it from instruments' files or an XCTrack QR code, export it back to them, and ask the API
-// what the task model predicts for it with the weather and pilots of a competition day at the site.
+// what the task model predicts for it with either a live multi-model forecast or a past competition
+// day's ERA5 reanalysis.
 
 import * as maplibregl from "maplibre-gl";
 import QRCode from "qrcode";
 import * as X from "./xctask";
-import { API, apiAvailable, predictRoute } from "./api";
+import {
+  API,
+  apiAvailable,
+  fetchForecastModels,
+  predictRoute,
+  type ForecastModelInfo,
+  type ModelPrediction,
+  type Prediction,
+} from "./api";
 
-/** A past competition day at the site: its weather and pilots are what a new task is predicted with. */
+/** A past competition day at the site: its weather (in ERA5 mode) and pilot field (in both modes). */
 export type Day = {
   key: string; date: string; competition: string | null; task: string | null; km: number | null;
   pred_kmh: number | null; pred_goal: number | null; route?: [number, number, number, string][];
@@ -18,11 +27,21 @@ type SiteWaypoints = {
   tasks: Record<string, { tps: [number, number, string][]; start: string | null; deadline: string | null; utc: number | null }>;
 };
 type Kind = "takeoff" | "sss" | "tp" | "ess" | "goal";
+type WxMode = "forecast" | "era5";
+type BlendKind = "median" | "mean";
 
 const COLORS: Record<Kind, string> = { takeoff: "#7a7873", sss: "#2f7d3a", tp: "#1d4f99", ess: "#b26a00", goal: "#cf5222" };
 const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 const MAX_FROM_SITE_DEG = 3;
 const SNAP_PX = 12;
+
+const FALLBACK_MODELS: ForecastModelInfo[] = [
+  { id: "ecmwf_ifs", name: "ECMWF IFS", region: "global", resolution_km: 9, max_days: 6, blh_source: "native", available: true },
+  { id: "ecmwf_aifs", name: "ECMWF AIFS", region: "global", resolution_km: 28, max_days: 6, blh_source: "parcel", available: true },
+  { id: "gfs", name: "GFS", region: "global", resolution_km: 25, max_days: 6, blh_source: "native", available: true },
+  { id: "icon", name: "ICON", region: "global", resolution_km: 13, max_days: 6, blh_source: "parcel", available: true },
+  { id: "gem", name: "GEM", region: "global", resolution_km: 15, max_days: 6, blh_source: "parcel", available: true },
+];
 
 let map: maplibregl.Map | null = null;
 let markers: maplibregl.Marker[] = [];
@@ -34,16 +53,27 @@ let task: X.Task = X.emptyTask();
 let dist: X.Distances | null = null;
 let adding = false;
 let dragging = false;
-let insertAfter = -1;               // map clicks insert after this row; -1 appends
+let insertAfter = -1;                  // map clicks insert after this row; -1 appends
 let siteWps: X.Waypoint[] = [];
 let extraWps: X.Waypoint[] = [];
-let utc = 0;                        // local time minus UTC at the site, hours
-let tplTask: X.Task | null = null; // the task as it was set
-let tplSS: number | null = null;    // this page's optimized speed section of the task as set
-let tplGate: string | null = null;  // its first start gate (UTC)
+let utc = 0;                           // local time minus UTC at the site, hours
+let tplTask: X.Task | null = null;     // the task as it was set
+let tplSS: number | null = null;       // this page's optimized speed section of the task as set
+let tplGate: string | null = null;     // its first start gate (UTC)
 let raf = 0;
-let draggedAt = 0;                // a drag ends with a click on the marker: ignore it
+let draggedAt = 0;                     // a drag ends with a click on the marker: ignore it
 const cache = new Map<string, Promise<SiteWaypoints | null>>();
+
+// Forecast mode state
+let wxMode: WxMode = "forecast";
+let fcDate = "";
+let fcMinDate = "";
+let fcMaxDate = "";
+let fcModels: ForecastModelInfo[] = FALLBACK_MODELS;
+let fcChoice = "blend";                // "blend" or a model id
+let fcBlendKind: BlendKind = "median";
+let fcIncluded = new Set<string>();
+let lastForecast: Prediction | null = null;
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => el!.querySelector<T>(sel)!;
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -55,6 +85,27 @@ const hm = (h: number | null | undefined) => {
 };
 const pct = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? "–" : `${Math.round(v * 100)}%`);
 const km = (v: number | null | undefined) => (v == null ? "–" : `${v.toFixed(1)} km`);
+
+function isoDateOffset(offsetDays: number, offsetHours = 0): string {
+  const d = new Date(Date.now() + offsetHours * 3600_000 + offsetDays * 86400_000);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+
+function initForecastDates() {
+  fcMinDate = isoDateOffset(-1);
+  fcMaxDate = isoDateOffset(6);
+  const localToday = isoDateOffset(0, utc);
+  fcDate = localToday < fcMinDate ? fcMinDate : localToday > fcMaxDate ? fcMaxDate : localToday;
+}
+
+function relativeDayTag(iso: string): string {
+  const localToday = isoDateOffset(0, utc);
+  const diff = Math.round((Date.parse(`${iso}T12:00:00Z`) - Date.parse(`${localToday}T12:00:00Z`)) / 86400_000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  if (diff === -1) return "Yesterday";
+  return diff > 1 ? `+${diff}d` : `${diff}d`;
+}
 
 /** Shifts "HH:MM[:SS]" by hours; returns "HH:MM". */
 function shift(t: string, h: number): string {
@@ -258,18 +309,27 @@ export function mountPlanner(box: HTMLElement, c: PlanContext) {
   root = box;
   ctx = { ...c, days: [...c.days].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)) };
   utc = Math.round(c.site.lon / 15);
+  wxMode = "forecast";
+  fcChoice = "blend";
+  fcBlendKind = "median";
+  fcModels = FALLBACK_MODELS;
+  fcIncluded = new Set(FALLBACK_MODELS.map((m) => m.id));
+  lastForecast = null;
+  initForecastDates();
   box.hidden = false;
   // the latest day whose task is on record, so "That day's task" has something to show
   setDay(ctx.days.find((d) => (d.route?.length ?? 0) >= 2) ?? ctx.days[0] ?? null);
   expand();
 }
 
-/** Opens a past task in the planner, on its own day. */
+/** Opens a past task in the planner, on its own day in ERA5 mode. */
 export async function planFrom(key: string) {
   if (!ctx || !root) return;
   const d = ctx.days.find((x) => x.key === key);
   if (!d) return;
+  wxMode = "era5";
   if (!el) expand();
+  else applyWxModeUI();
   await setDay(d);
   if (el) $<HTMLSelectElement>("#p-day").value = d.key;
   await loadDayTask();
@@ -314,6 +374,7 @@ export function closePlanner() {
   extraWps = [];
   siteWps = [];
   insertAfter = -1;
+  lastForecast = null;
 }
 
 /** Takes the planner off the map (its task is kept for when it opens again). */
@@ -344,17 +405,140 @@ function showSetRoute(on: boolean) {
   for (const id of ["route-cyl", "route-line"]) if (map?.getLayer(id)) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
 }
 
+function renderForecastControls() {
+  if (!el) return;
+  const dateInput = $<HTMLInputElement>("#p-fdate");
+  dateInput.min = fcMinDate;
+  dateInput.max = fcMaxDate;
+  dateInput.value = fcDate;
+  $("#p-fdate-tag").textContent = relativeDayTag(fcDate);
+
+  // If the selected single model is out of horizon for this date, fall back to blend.
+  if (fcChoice !== "blend" && !fcModels.some((m) => m.id === fcChoice && m.available)) {
+    fcChoice = "blend";
+  }
+
+  const modelsBox = $("#p-fc-models");
+  const resText = (r: number) => `${r >= 10 ? Math.round(r) : r}k`;
+  const pills = [
+    `<button type="button" data-fc="blend" class="${fcChoice === "blend" ? "on" : ""}" title="Combine every available model for this date">Blend</button>`,
+    ...fcModels.map((m) => {
+      const on = fcChoice === m.id ? " on" : "";
+      const reg = m.region === "regional" ? " reg" : "";
+      const dis = m.available ? "" : " disabled";
+      const tip = m.available
+        ? `${m.name} (${m.resolution_km} km, ${m.region}, BLH: ${m.blh_source})`
+        : `${m.name} covers up to ${m.max_days} days ahead`;
+      return `<button type="button" data-fc="${esc(m.id)}" class="${(on + reg).trim()}"${dis} title="${esc(tip)}">${esc(m.name)} <span class="res">${resText(m.resolution_km)}</span></button>`;
+    }),
+  ];
+  modelsBox.innerHTML = pills.join("");
+  modelsBox.querySelectorAll<HTMLButtonElement>("button[data-fc]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.fc!;
+      if (id === fcChoice) return;
+      fcChoice = id;
+      renderForecastControls();
+      if (lastForecast && canRenderCachedChoice(lastForecast)) {
+        renderForecastResult();
+      } else {
+        $("#p-out").innerHTML = lastForecast ? `<p class="hint">Click Predict this task to load ${id === "blend" ? "all forecast models" : esc(modelLabel(id))}.</p>` : "";
+      }
+    });
+  });
+
+  const blendBar = $("#p-blend-bar");
+  blendBar.hidden = fcChoice !== "blend";
+  blendBar.querySelectorAll<HTMLButtonElement>("button[data-blend]").forEach((b) => {
+    const active = b.dataset.blend === fcBlendKind;
+    b.classList.toggle("on", active);
+    b.setAttribute("aria-checked", String(active));
+  });
+}
+
+function modelLabel(id: string): string {
+  return fcModels.find((m) => m.id === id)?.name ?? id;
+}
+
+function canRenderCachedChoice(pred: Prediction): boolean {
+  const list = pred.models ?? [];
+  if (!list.length) return false;
+  if (fcChoice === "blend") {
+    const availIds = fcModels.filter((m) => m.available).map((m) => m.id);
+    const haveIds = new Set(list.map((m) => m.id));
+    // Re-use cached response only if we already fetched more than one model (or all available).
+    return list.length >= 2 || availIds.every((id) => haveIds.has(id));
+  }
+  return list.some((m) => m.id === fcChoice);
+}
+
+async function loadForecastModels() {
+  if (!ctx || !API) return;
+  const c = ctx, dateStr = fcDate;
+  try {
+    const res = await fetchForecastModels(c.site.id, dateStr);
+    if (ctx !== c || fcDate !== dateStr || !el) return;
+    fcMinDate = res.min_date;
+    fcMaxDate = res.max_date;
+    if (fcDate < fcMinDate) fcDate = fcMinDate;
+    if (fcDate > fcMaxDate) fcDate = fcMaxDate;
+    fcModels = res.models.length ? res.models : FALLBACK_MODELS;
+    fcIncluded = new Set(fcModels.filter((m) => m.available).map((m) => m.id));
+    renderForecastControls();
+  } catch {
+    // Keep fallback global list when offline or older API doesn't expose /forecast/models yet.
+    if (ctx === c && el) renderForecastControls();
+  }
+}
+
+function applyWxModeUI() {
+  if (!el || !ctx) return;
+  el.querySelectorAll<HTMLButtonElement>("#p-wx-mode button[data-mode]").forEach((b) => {
+    const on = b.dataset.mode === wxMode;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", String(on));
+  });
+  const isFc = wxMode === "forecast";
+  $("#p-fc-box").hidden = !isFc;
+  $("#p-day-lbl").textContent = isFc ? "Pilot field from" : "Weather and pilots of";
+  $("#p-day-hint").textContent = ctx.days.length
+    ? (isFc
+        ? "Pilots and ratings come from this competition day; weather comes from the live forecast."
+        : "Re-plans the task with that past competition day's ERA5 weather and pilot field.")
+    : "No competition day on record at this site: tasks can be set and exported, not predicted.";
+  if (isFc) renderForecastControls();
+}
+
 function expand() {
   const box = root!, c = ctx!;
   el = box;
   box.classList.add("open");
   const days = c.days.map((d) => `<option value="${esc(d.key)}"${d === day ? " selected" : ""}>${esc(dayLabel(d))}</option>`).join("");
   box.innerHTML = `<div class="plan-head"><h3>Create a task</h3><button class="close" id="p-close" aria-label="Close the planner">✕</button></div>
-    <label class="day">Weather and pilots of
+    <div class="seg seg-2" id="p-wx-mode" role="radiogroup" aria-label="Weather source">
+      <button type="button" role="radio" data-mode="forecast" aria-checked="true" class="on">Forecast</button>
+      <button type="button" role="radio" data-mode="era5" aria-checked="false">Past day (ERA5)</button>
+    </div>
+    <div class="fc-box" id="p-fc-box">
+      <div class="fc-date-row">
+        <label class="fc-date">Forecast date
+          <input type="date" id="p-fdate">
+        </label>
+        <span class="fc-tag" id="p-fdate-tag"></span>
+      </div>
+      <div class="fc-label">Forecast model</div>
+      <div class="btns fc-models" id="p-fc-models"></div>
+      <div class="fc-blend-row" id="p-blend-bar">
+        <span>Blend</span>
+        <div class="seg seg-2 seg-sm" role="radiogroup" aria-label="Blend method">
+          <button type="button" role="radio" data-blend="median" aria-checked="true" class="on">Median</button>
+          <button type="button" role="radio" data-blend="mean" aria-checked="false">Mean</button>
+        </div>
+      </div>
+    </div>
+    <label class="day"><span id="p-day-lbl">Pilot field from</span>
       <select id="p-day"${c.days.length ? "" : " disabled"}>${days || "<option>no competition day on record here</option>"}</select></label>
-    <p class="hint">${c.days.length
-      ? "Until forecasts are in, a task is predicted with the weather and the pilots of a past competition day at this site."
-      : "No competition day on record at this site: tasks can be set and exported, not predicted."}</p>
+    <p class="hint" id="p-day-hint"></p>
     <div class="btns">
       <button id="p-tpl"${c.days.length ? "" : " disabled"}>That day's task</button>
       <button id="p-clear">Clear</button>
@@ -390,6 +574,31 @@ function expand() {
     </div>`;
 
   $("#p-close").addEventListener("click", collapse);
+  box.querySelectorAll<HTMLButtonElement>("#p-wx-mode button[data-mode]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const m = b.dataset.mode as WxMode;
+      if (m === wxMode) return;
+      wxMode = m;
+      applyWxModeUI();
+      staleResult();
+      if (wxMode === "forecast") loadForecastModels();
+    });
+  });
+  $<HTMLInputElement>("#p-fdate").addEventListener("change", (e) => {
+    const v = (e.target as HTMLInputElement).value;
+    if (!v) return;
+    fcDate = v;
+    staleResult();
+    renderForecastControls();
+    loadForecastModels();
+  });
+  box.querySelectorAll<HTMLButtonElement>("#p-blend-bar button[data-blend]").forEach((b) => {
+    b.addEventListener("click", () => {
+      fcBlendKind = b.dataset.blend as BlendKind;
+      renderForecastControls();
+      if (lastForecast && fcChoice === "blend") renderForecastResult();
+    });
+  });
   $<HTMLSelectElement>("#p-day").addEventListener("change", async (e) => {
     const d = c.days.find((x) => x.key === (e.target as HTMLSelectElement).value) ?? null;
     await setDay(d);
@@ -427,6 +636,8 @@ function expand() {
   });
   $("#p-qr-copy").addEventListener("click", () => navigator.clipboard?.writeText(X.toQR(named())).then(() => msg("QR text copied.")));
 
+  applyWxModeUI();
+  loadForecastModels();
   if (task.tps.length) { setAdding(false); msg(""); }
   else { setAdding(true); startMsg(); }
   changed(true);
@@ -492,6 +703,7 @@ function changed(list: boolean) {
 }
 
 function staleResult() {
+  lastForecast = null;
   if (!el) return;
   $("#p-out").innerHTML = "";
   $("#p-qr").hidden = true;
@@ -588,12 +800,156 @@ function sameRoute(a: X.Task, b: X.Task): boolean {
   });
 }
 
+function medianOf(nums: number[]): number {
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+function meanOf(nums: number[]): number {
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+function rangeBar(minV: number, maxV: number, val: number, scaleMin: number, scaleMax: number): string {
+  const span = Math.max(scaleMax - scaleMin, 1e-6);
+  const clamp = (x: number) => Math.max(0, Math.min(100, ((x - scaleMin) / span) * 100));
+  const lo = clamp(minV), hi = clamp(maxV), pt = clamp(val);
+  return `<div class="range-bar" aria-hidden="true"><span class="range-fill" style="left:${lo.toFixed(1)}%;width:${Math.max(2, hi - lo).toFixed(1)}%"></span><span class="range-dot" style="left:${pt.toFixed(1)}%"></span></div>`;
+}
+
+function windShort(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "–";
+  const sign = v >= 0 ? "+" : "−";
+  return `${sign}${Math.abs(v).toFixed(1)}`;
+}
+
+function weatherTooltip(m: ModelPrediction): string {
+  const w = m.weather || {};
+  const parts = [
+    `${m.name} (${m.resolution_km} km)`,
+    w.blh_mean != null ? `BLH ${Math.round(w.blh_mean)} m (${m.blh_source})` : null,
+    w.usable_m != null ? `usable ${Math.round(w.usable_m)} m` : null,
+    w.tailwind_700 != null ? `700 hPa ${w.tailwind_700 >= 0 ? "tail" : "head"} ${Math.abs(w.tailwind_700).toFixed(1)} m/s` : null,
+    w.wind_700 != null ? `wind700 ${w.wind_700.toFixed(1)} m/s` : null,
+    w.cloud_total != null ? `clouds ${Math.round(w.cloud_total * 100)}%` : null,
+    w.cape != null ? `CAPE ${Math.round(w.cape)}` : null,
+    w.rain_mm != null && w.rain_mm >= 0.1 ? `rain ${w.rain_mm.toFixed(1)} mm` : null,
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function renderForecastResult() {
+  if (!el || !lastForecast || !day) return;
+  const out = $("#p-out");
+  const all = lastForecast.models ?? [];
+  if (!all.length) return;
+
+  const isBlend = fcChoice === "blend";
+  let active = isBlend ? all.filter((m) => fcIncluded.has(m.id)) : all.filter((m) => m.id === fcChoice);
+  if (!active.length) active = isBlend ? all : [all[0]];
+
+  const agg = fcBlendKind === "mean" ? meanOf : medianOf;
+  const hours = active.map((m) => m.winner_h).filter((v): v is number => v != null && Number.isFinite(v));
+  const goals = active.map((m) => m.goal_share);
+  const headH = hours.length ? agg(hours) : null;
+  const headGoal = agg(goals);
+  const minH = hours.length ? Math.min(...hours) : null;
+  const maxH = hours.length ? Math.max(...hours) : null;
+  const minG = Math.min(...goals);
+  const maxG = Math.max(...goals);
+
+  // Scale for the time range bar: pad tightly around all fetched models so spread is legible.
+  const allHours = all.map((m) => m.winner_h).filter((v): v is number => v != null && Number.isFinite(v));
+  const tLo = allHours.length ? Math.max(0, Math.min(...allHours) - 0.25) : 0;
+  const tHi = allHours.length ? Math.max(...allHours) + 0.25 : 4;
+
+  const showRange = active.length >= 2 && minH != null && maxH != null && headH != null;
+  const timeRangeHtml = showRange
+    ? `<span class="range-txt">${hm(minH)} – ${hm(maxH)}</span>${rangeBar(minH!, maxH!, headH!, tLo, tHi)}`
+    : "";
+  const goalRangeHtml = active.length >= 2
+    ? `<span class="range-txt">${pct(minG)} – ${pct(maxG)}</span>${rangeBar(minG, maxG, headGoal, 0, 1)}`
+    : "";
+
+  const label = isBlend
+    ? `Blend (${fcBlendKind === "median" ? "median" : "mean"} of ${active.length} ${active.length === 1 ? "model" : "models"})`
+    : `${active[0].name} (${active[0].resolution_km} km)`;
+
+  const blhVals = active.map((m) => m.weather?.blh_mean).filter((v): v is number => v != null);
+  const twVals = active.map((m) => m.weather?.tailwind_700).filter((v): v is number => v != null);
+  const cldVals = active.map((m) => m.weather?.cloud_total).filter((v): v is number => v != null);
+  const rainVals = active.map((m) => m.weather?.rain_mm).filter((v): v is number => v != null);
+  const medBlh = blhVals.length ? Math.round(agg(blhVals)) : null;
+  const medTw = twVals.length ? agg(twVals) : null;
+  const medCld = cldVals.length ? Math.round(agg(cldVals) * 100) : null;
+  const medRain = rainVals.length ? agg(rainVals) : null;
+  const chips = active[0].weather?.route_chips;
+
+  const hasParcel = all.some((m) => m.blh_source === "parcel");
+  const rowsHtml = all.map((m) => {
+    const checked = fcIncluded.has(m.id);
+    const focused = !isBlend && m.id === fcChoice;
+    const dimmed = isBlend && !checked;
+    const w = m.weather || {};
+    const blhStr = w.blh_mean == null ? "–" : `${m.blh_source === "parcel" ? "~" : ""}${Math.round(w.blh_mean)}m`;
+    const rainTag = w.rain_mm != null && w.rain_mm >= 0.3 ? ` · ${w.rain_mm.toFixed(1)}mm` : "";
+    return `<tr class="${focused ? "sel" : ""}${dimmed ? " dim" : ""}" title="${esc(weatherTooltip(m))}">
+      <td class="fc-m">
+        ${isBlend ? `<input type="checkbox" data-inc="${esc(m.id)}"${checked ? " checked" : ""} aria-label="Include ${esc(m.name)} in blend">` : ""}
+        <button type="button" class="fc-pick" data-pick="${esc(m.id)}">${esc(m.name)}</button>
+      </td>
+      <td class="num">${hm(m.winner_h)}</td>
+      <td class="num">${pct(m.goal_share)}</td>
+      <td class="num wx-col">${blhStr} · ${windShort(w.tailwind_700)}${rainTag}</td>
+    </tr>`;
+  }).join("");
+
+  const skippedHtml = lastForecast.skipped?.length
+    ? `<p class="hint">Not included: ${esc(lastForecast.skipped.map((s) => `${s.id} (${s.reason})`).join(", "))}.</p>`
+    : "";
+
+  out.innerHTML = `<div class="whatif-out">
+      <div><span class="lbl">Winner's time</span><b>${hm(headH)}</b>${timeRangeHtml}</div>
+      <div><span class="lbl">In goal</span><b>${pct(headGoal)}</b>${goalRangeHtml}</div>
+    </div>
+    <p class="hint"><b>${esc(label)}</b> for ${esc(lastForecast.date ?? fcDate)} · pilots from ${esc(day.date)}.
+      ${lastForecast.ss_km} km speed section · BLH ${medBlh == null ? "–" : `${medBlh} m`} ·
+      ${medTw == null ? "–" : `${medTw >= 0 ? "tailwind" : "headwind"} ${Math.abs(medTw).toFixed(1)} m/s`} at 700 hPa ·
+      ${medCld == null ? "–" : `clouds ${medCld}%`}${medRain != null && medRain >= 0.2 ? ` · rain ${medRain.toFixed(1)} mm` : ""} ·
+      ${chips ?? "–"} weather cells.</p>
+    <table class="fc-table">
+      <thead><tr><th>Model</th><th class="num">Time</th><th class="num">Goal</th><th class="num">BLH · W700</th></tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    ${hasParcel ? `<p class="hint">~BLH estimated from the model's 925–600 hPa temperature profile. W700 is tailwind (+) / headwind (−) in m/s.</p>` : `<p class="hint">W700 is tailwind (+) / headwind (−) at 700 hPa in m/s.</p>`}
+    ${skippedHtml}`;
+
+  out.querySelectorAll<HTMLInputElement>("input[data-inc]").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const id = cb.dataset.inc!;
+      if (cb.checked) fcIncluded.add(id);
+      else if (fcIncluded.size > 1) fcIncluded.delete(id);
+      else cb.checked = true;   // keep at least one model in the blend
+      renderForecastResult();
+    });
+  });
+  out.querySelectorAll<HTMLButtonElement>("button[data-pick]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.pick!;
+      if (all.length < 2) return;
+      fcChoice = fcChoice === id ? "blend" : id;
+      renderForecastControls();
+      renderForecastResult();
+    });
+  });
+}
+
 async function runPredict() {
   if (!ctx || !el || !day || task.tps.length < 2) return;
   const c = ctx, t = day;
   const go = $<HTMLButtonElement>("#p-go"), out = $("#p-out");
   go.disabled = true;
-  out.innerHTML = `<p class="hint">Reading the weather of ${t.date} along your route…</p>`;
+
   // the speed section on the same footing as the task's official one: the official distance for the
   // task as set (so it predicts exactly as on the card), otherwise scaled by the ratio between the
   // official distance and this page's measure of the task as set, when the two agree
@@ -604,13 +960,61 @@ async function runPredict() {
   }
   // a new start time moves the weather window; solar time = UTC + longitude / 15
   let startSolar: number | undefined;
-  if (task.gates[0] && task.gates[0] !== tplGate) {
+  if (task.gates[0] && (wxMode === "forecast" || task.gates[0] !== tplGate)) {
     const [h, m] = task.gates[0].split(":").map(Number);
     startSolar = (((h + m / 60 + c.site.lon / 15) % 24) + 24) % 24;
   }
+  let windowH: number | undefined;
+  if (task.gates[0] && task.deadline) {
+    const [sh, sm] = task.gates[0].split(":").map(Number);
+    const [eh, em] = task.deadline.split(":").map(Number);
+    const diff = (((eh * 60 + em) - (sh * 60 + sm)) + 1440) % 1440;
+    if (diff >= 30 && diff <= 600) windowH = Math.round((diff / 60) * 100) / 100;
+  }
+
+  const route = task.tps.map((p) => [p.lat, p.lon, p.radius] as [number, number, number]);
+
+  if (wxMode === "forecast") {
+    const modelIds = fcChoice === "blend"
+      ? fcModels.filter((m) => m.available).map((m) => m.id)
+      : [fcChoice];
+    out.innerHTML = `<p class="hint">Fetching ${fcChoice === "blend" ? `${modelIds.length} forecast models` : esc(modelLabel(fcChoice))} for ${esc(fcDate)} along your route…</p>`;
+    try {
+      const j = await predictRoute({
+        site: c.site.id,
+        template: t.key,
+        route,
+        ss_km: ss != null ? Math.round(ss * 100) / 100 : undefined,
+        start_solar_h: startSolar,
+        window_h: windowH,
+        weather: { source: "forecast", date: fcDate, models: modelIds },
+      });
+      if (!el) return;
+      lastForecast = j;
+      if (fcChoice === "blend") {
+        const returnedIds = (j.models ?? []).map((m) => m.id);
+        const kept = returnedIds.filter((id) => fcIncluded.has(id));
+        fcIncluded = new Set(kept.length ? kept : returnedIds);
+      }
+      renderForecastResult();
+    } catch (e) {
+      if (el) out.innerHTML = `<p class="hint">The forecast prediction failed: ${esc(String((e as Error).message || e))}</p>`;
+    }
+    updateGo();
+    return;
+  }
+
+  out.innerHTML = `<p class="hint">Reading the weather of ${t.date} along your route…</p>`;
   try {
-    const j = await predictRoute({ site: c.site.id, template: t.key, route: task.tps.map((p) => [p.lat, p.lon, p.radius]),
-      ss_km: ss != null ? Math.round(ss * 100) / 100 : undefined, start_solar_h: startSolar });
+    const j = await predictRoute({
+      site: c.site.id,
+      template: t.key,
+      route,
+      ss_km: ss != null ? Math.round(ss * 100) / 100 : undefined,
+      start_solar_h: startSolar,
+      window_h: windowH,
+      weather: { source: "era5" },
+    });
     if (!el) return;
     const w = j.weather || {};
     const asSet = t.pred_kmh && t.km ? t.km / t.pred_kmh : null;
@@ -696,7 +1100,8 @@ function named(): X.Task {
 
 function fileBase(): string {
   const c = ctx!;
-  const s = `${c.site.name}${day ? `-${day.date}` : ""}`.normalize("NFKD").replace(/[^\w.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const dStr = wxMode === "forecast" ? fcDate : day?.date;
+  const s = `${c.site.name}${dStr ? `-${dStr}` : ""}`.normalize("NFKD").replace(/[^\w.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
   return `${s || "task"}-task`;
 }
 
