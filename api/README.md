@@ -6,9 +6,10 @@ A small FastAPI service that evaluates a task drawn on the web page with either:
   along the route exactly as `scripts/task_model.py` does for training.
 - **Live weather forecast (Open-Meteo):** future dates (today through +6 days) using one or more
   forecast models (`ecmwf_ifs`, `ecmwf_aifs`, `gfs`, `icon`, `gem`, plus regional models where
-  covered: `rrfs`, `hrdps`, `icon_d2`, `icon_eu`, `arome`), returning each model's prediction and a
-  median/mean blend with min–max range (`api/forecast.py`, 1 h per-chip cache). Pilots and ratings
-  are taken from the selected past competition day as a template.
+  covered: `rrfs`, `hrdps`, `icon_d2`, `icon_eu`, `arome`), fetched in parallel per model with only
+  the variables each model publishes, returning each model's prediction and a median/mean blend with
+  min–max range (`api/forecast.py`, 1 h per-chip cache). Pilots and ratings are taken from the
+  selected past competition day as a template.
 
 The web page works without it (the task planner still imports and exports tasks); with it, the
 planner predicts the tasks set on it.
