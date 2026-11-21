@@ -23,6 +23,7 @@ import argparse
 import gzip
 import http.client
 import json
+import logging
 import math
 import socket
 import ssl
@@ -32,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -47,9 +49,12 @@ from pta import grid  # noqa: E402
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 CACHE_TTL_S = 3600       # 1 h cache per (chip_id, open-meteo model slug)
 CACHE_MAX_ITEMS = 800
-HTTP_TIMEOUT_S = 25
+HTTP_TIMEOUT_S = 14
 MAX_FORECAST_DAYS = 7    # today through +6 days (UTC); request 8 days so western tasks crossing 00 UTC stay covered
 FETCH_FORECAST_DAYS = 8
+MAX_WORKERS = 8
+
+LOG = logging.getLogger("uvicorn.error")
 
 # Supported forecast models: global models work at every site; regional models are offered only
 # where the site (and route) falls inside their bounding box (south, north, west, east) and the
@@ -161,7 +166,75 @@ MODELS: list[dict[str, Any]] = [
 ]
 
 MODEL_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
-GLOBAL_SLUGS: set[str] = {s for m in MODELS if m["region"] == "global" for s in m["slugs"]}
+
+_SURF_CORE = [
+    "shortwave_radiation", "cloud_cover", "cloud_cover_low", "precipitation",
+    "temperature_2m", "dew_point_2m", "wind_speed_10m", "wind_direction_10m",
+]
+_W100 = ["wind_speed_100m", "wind_direction_100m"]
+_W80_120 = ["wind_speed_80m", "wind_direction_80m", "wind_speed_120m", "wind_direction_120m"]
+_LEVELS_850_700 = [
+    "temperature_850hPa", "geopotential_height_850hPa", "wind_speed_850hPa", "wind_direction_850hPa",
+    "relative_humidity_850hPa", "temperature_700hPa", "geopotential_height_700hPa", "wind_speed_700hPa",
+    "wind_direction_700hPa", "relative_humidity_700hPa",
+]
+_LEVELS_PARCEL = [
+    "temperature_925hPa", "geopotential_height_925hPa", "temperature_600hPa", "geopotential_height_600hPa",
+]
+
+# Request only the variables each Open-Meteo slug actually publishes to minimize server work and latency.
+SLUG_VARS: dict[str, list[str]] = {
+    "ecmwf_ifs": [
+        *_SURF_CORE, "boundary_layer_height", "cape", "convective_inhibition",
+        *_W100, "wind_gusts_10m", "soil_temperature_0_to_7cm", "soil_moisture_0_to_7cm",
+    ],
+    "ecmwf_ifs025": [*_LEVELS_850_700, *_LEVELS_PARCEL],
+    "ecmwf_aifs025_single": [
+        *_SURF_CORE, *_W100, "soil_temperature_0_to_7cm", "soil_moisture_0_to_7cm",
+        *_LEVELS_850_700, *_LEVELS_PARCEL,
+    ],
+    "gfs_global": [
+        *_SURF_CORE, "boundary_layer_height", "cape", "convective_inhibition",
+        *_W100, "wind_gusts_10m", "soil_temperature_0_to_10cm", "soil_moisture_0_to_10cm",
+        "freezing_level_height", *_LEVELS_850_700,
+    ],
+    "icon_global": [
+        *_SURF_CORE, "cape", *_W100, "wind_gusts_10m", "soil_temperature_0cm",
+        "soil_moisture_0_to_1cm", "freezing_level_height", *_LEVELS_850_700, *_LEVELS_PARCEL,
+    ],
+    "gem_global": [
+        *_SURF_CORE, "cape", *_W80_120, "wind_gusts_10m", "soil_temperature_0_to_10cm",
+        "soil_moisture_0_to_10cm", *_LEVELS_850_700, *_LEVELS_PARCEL,
+    ],
+    "ncep_rrfs_conus": [
+        *_SURF_CORE, "boundary_layer_height", "cape", "convective_inhibition",
+        *_W100, "wind_gusts_10m", "soil_temperature_0cm", "soil_moisture_0_to_10cm",
+        "freezing_level_height", *_LEVELS_850_700,
+    ],
+    "gem_hrdps_continental": [
+        *_SURF_CORE, "cape", *_W80_120, "wind_gusts_10m", "soil_temperature_0_to_10cm",
+        "soil_moisture_0_to_10cm", *_LEVELS_850_700, *_LEVELS_PARCEL,
+    ],
+    "icon_d2": [
+        *_SURF_CORE, "cape", "convective_inhibition", *_W100, "wind_gusts_10m",
+        "soil_temperature_0cm", "soil_moisture_0_to_1cm", "freezing_level_height",
+        *_LEVELS_850_700, *_LEVELS_PARCEL,
+    ],
+    "icon_eu": [
+        *_SURF_CORE, "cape", "convective_inhibition", *_W100, "wind_gusts_10m",
+        "soil_temperature_0cm", "soil_moisture_0_to_1cm", "freezing_level_height",
+        *_LEVELS_850_700, *_LEVELS_PARCEL,
+    ],
+    "meteofrance_arome_france": [
+        *_SURF_CORE, "cape", *_W100, "wind_gusts_10m", *_LEVELS_850_700, *_LEVELS_PARCEL,
+    ],
+}
+
+SLUG_DAYS: dict[str, int] = {
+    slug: min(FETCH_FORECAST_DAYS, int(m["max_days"]) + 2)
+    for m in MODELS
+    for slug in m["slugs"]
+}
 
 HOURLY_VARS: list[str] = [
     "boundary_layer_height",
@@ -258,10 +331,19 @@ def _http_get_json(params: dict[str, Any]) -> Any:
                 return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError:
             raise
+        except TimeoutError as exc:
+            # Avoid doubling latency when a single upstream model stalls.
+            raise RuntimeError(f"Open-Meteo timed out after {HTTP_TIMEOUT_S}s") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise RuntimeError(f"Open-Meteo timed out after {HTTP_TIMEOUT_S}s") from exc
+            last_err = exc
+            if attempt == 0:
+                time.sleep(0.3)
         except Exception as exc:
             last_err = exc
             if attempt == 0:
-                time.sleep(0.5)
+                time.sleep(0.3)
     raise RuntimeError(f"Open-Meteo request failed: {last_err}")
 
 
@@ -323,42 +405,45 @@ def _prune_cache(now: float) -> None:
             _CACHE.pop(k, None)
 
 
-def _fetch_batch(chips: list[int], slugs: list[str]) -> dict[tuple[int, str], tuple[float, list[str], dict[str, np.ndarray]]]:
-    """Fetch one Open-Meteo multi-coordinate, multi-model batch and parse per (chip_id, slug)."""
+def _fetch_slug(chips: list[int], slug: str) -> dict[tuple[int, str], tuple[float, list[str], dict[str, np.ndarray]]]:
+    """Fetch one Open-Meteo model slug across `chips`, requesting only variables that slug publishes."""
     lats, lons = [], []
     for cid in chips:
         la, lo = grid.chip_centre(int(cid))
         lats.append(f"{la:.4f}")
         lons.append(f"{lo:.4f}")
+    req_vars = SLUG_VARS.get(slug, HOURLY_VARS)
     data = _http_get_json({
         "latitude": ",".join(lats),
         "longitude": ",".join(lons),
-        "hourly": ",".join(HOURLY_VARS),
-        "models": ",".join(slugs),
+        "hourly": ",".join(req_vars),
+        "models": slug,
         "wind_speed_unit": "ms",
         "timezone": "UTC",
         "past_days": 1,
-        "forecast_days": FETCH_FORECAST_DAYS,
+        "forecast_days": SLUG_DAYS.get(slug, FETCH_FORECAST_DAYS),
     })
     items = data if isinstance(data, list) else [data]
     if len(items) != len(chips):
         raise RuntimeError(f"Open-Meteo returned {len(items)} locations for {len(chips)} chips")
-    multi = len(slugs) > 1
+    req_set = set(req_vars)
     parsed: dict[tuple[int, str], tuple[float, list[str], dict[str, np.ndarray]]] = {}
     for cid, item in zip(chips, items):
         elev = float(item.get("elevation") or 0.0)
         hourly = item.get("hourly") or {}
         times = list(hourly.get("time") or [])
         n = len(times)
-        for slug in slugs:
-            suffix = f"_{slug}" if multi else ""
-            cols = {v: _to_float_array(hourly.get(f"{v}{suffix}"), n) for v in HOURLY_VARS}
-            parsed[(int(cid), slug)] = (elev, times, cols)
+        cols = {
+            v: (_to_float_array(hourly.get(v), n) if v in req_set else np.full(n, np.nan, dtype=np.float64))
+            for v in HOURLY_VARS
+        }
+        parsed[(int(cid), slug)] = (elev, times, cols)
     return parsed
 
 
 def _ensure_cached(chips: list[int], slugs: list[str]) -> dict[str, str]:
-    """Ensure every (chip, slug) is present in _CACHE. Returns {slug: error} for failed slugs."""
+    """Ensure every (chip, slug) is present in _CACHE, fetching missing slugs in parallel.
+    Returns {slug: error} for failed slugs."""
     now = time.monotonic()
     missing_by_slug: dict[str, list[int]] = {}
     with _CACHE_LOCK:
@@ -366,50 +451,35 @@ def _ensure_cached(chips: list[int], slugs: list[str]) -> dict[str, str]:
         for slug in slugs:
             miss = [c for c in chips if (c, slug) not in _CACHE or now - _CACHE[(c, slug)][0] > CACHE_TTL_S]
             if miss:
-                missing_by_slug[slug] = miss
+                missing_by_slug[slug] = sorted(miss)
 
     errors: dict[str, str] = {}
     if not missing_by_slug:
         return errors
 
-    # Batch global slugs that share the same missing chip set into a single HTTP request.
-    global_groups: dict[tuple[int, ...], list[str]] = {}
-    regional_slugs: list[tuple[str, list[int]]] = []
-    for slug, miss in missing_by_slug.items():
-        if slug in GLOBAL_SLUGS:
-            global_groups.setdefault(tuple(sorted(miss)), []).append(slug)
-        else:
-            regional_slugs.append((slug, sorted(miss)))
+    t0 = time.monotonic()
+    workers = min(MAX_WORKERS, len(missing_by_slug))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_slug = {
+            pool.submit(_fetch_slug, miss, slug): slug
+            for slug, miss in missing_by_slug.items()
+        }
+        for fut in as_completed(future_to_slug):
+            slug = future_to_slug[fut]
+            try:
+                fetched = fut.result()
+                ts = time.monotonic()
+                with _CACHE_LOCK:
+                    for key, val in fetched.items():
+                        _CACHE[key] = (ts, val[0], val[1], val[2])
+            except Exception as exc:
+                errors[slug] = str(exc)
 
-    for chip_tuple, gslugs in global_groups.items():
-        try:
-            fetched = _fetch_batch(list(chip_tuple), gslugs)
-            ts = time.monotonic()
-            with _CACHE_LOCK:
-                for key, val in fetched.items():
-                    _CACHE[key] = (ts, val[0], val[1], val[2])
-        except Exception as exc:
-            # Fall back to per-slug fetch if a combined request fails.
-            for slug in gslugs:
-                try:
-                    fetched = _fetch_batch(list(chip_tuple), [slug])
-                    ts = time.monotonic()
-                    with _CACHE_LOCK:
-                        for key, val in fetched.items():
-                            _CACHE[key] = (ts, val[0], val[1], val[2])
-                except Exception as inner:
-                    errors[slug] = str(inner)
-
-    for slug, miss in regional_slugs:
-        try:
-            fetched = _fetch_batch(miss, [slug])
-            ts = time.monotonic()
-            with _CACHE_LOCK:
-                for key, val in fetched.items():
-                    _CACHE[key] = (ts, val[0], val[1], val[2])
-        except Exception as exc:
-            errors[slug] = str(exc)
-
+    dt = time.monotonic() - t0
+    LOG.info(
+        "forecast fetch: %d chips, %d/%d slugs in %.2fs (failed %d)",
+        len(chips), len(missing_by_slug) - len(errors), len(slugs), dt, len(errors),
+    )
     return errors
 
 
