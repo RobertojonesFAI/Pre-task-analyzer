@@ -75,6 +75,14 @@ let fcBlendKind: BlendKind = "median";
 let fcIncluded = new Set<string>();
 let lastForecast: Prediction | null = null;
 
+// Live camera QR scanner & global listeners
+let camStream: MediaStream | null = null;
+let camFacing: "environment" | "user" = "environment";
+let camToken = 0;
+let camTimer = 0;
+let onPasteRef: ((e: ClipboardEvent) => void) | null = null;
+let onVisRef: (() => void) | null = null;
+
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => el!.querySelector<T>(sel)!;
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -379,6 +387,9 @@ export function closePlanner() {
 
 /** Takes the planner off the map (its task is kept for when it opens again). */
 function hide() {
+  stopCameraScan();
+  if (onPasteRef) { window.removeEventListener("paste", onPasteRef); onPasteRef = null; }
+  if (onVisRef) { document.removeEventListener("visibilitychange", onVisRef); onVisRef = null; }
   markers.forEach((m) => m.remove());
   markers = [];
   el = null;
@@ -543,11 +554,24 @@ function expand() {
       <button id="p-tpl"${c.days.length ? "" : " disabled"}>That day's task</button>
       <button id="p-clear">Clear</button>
       <button id="p-add" aria-pressed="false">Add on the map</button>
-      <label class="file-btn">Import…<input type="file" id="p-file" accept=".xctsk,.cup,.wpt,.gpx,.txt,.json,image/*"></label>
+      <button type="button" id="p-scan" aria-pressed="false" title="Scan an XCTrack QR code with your phone or laptop camera">Scan QR</button>
+      <label class="file-btn" title="Upload a screenshot or photo of a task QR code">QR image<input type="file" id="p-qr-img" accept="image/*"></label>
+      <label class="file-btn" title="Import .xctsk, .cup, .wpt, .gpx, or a QR image">Import file…<input type="file" id="p-file" accept=".xctsk,.cup,.wpt,.gpx,.txt,.json,image/*"></label>
       <button id="p-paste">Paste QR text</button>
     </div>
+    <div class="scan-box" id="p-scan-box" hidden>
+      <div class="scan-view">
+        <video id="p-scan-video" playsinline muted autoplay></video>
+        <div class="scan-frame" aria-hidden="true"></div>
+      </div>
+      <div class="btns">
+        <button type="button" id="p-scan-flip" hidden>Flip camera</button>
+        <button type="button" id="p-scan-stop">Stop camera</button>
+      </div>
+      <p class="hint" id="p-scan-hint">Point the camera at an XCTrack task QR code.</p>
+    </div>
     <div class="paste" id="p-paste-box" hidden>
-      <textarea id="p-paste-text" rows="3" placeholder="XCTSK:{…} or the contents of a task file"></textarea>
+      <textarea id="p-paste-text" rows="3" placeholder="XCTSK:{…} or the contents of a task file (or paste a QR screenshot anywhere with Ctrl/Cmd+V)"></textarea>
       <div class="btns"><button id="p-paste-go">Read</button></div>
     </div>
     <p class="plan-msg" id="p-msg" role="status"></p>
@@ -607,6 +631,17 @@ function expand() {
   $("#p-tpl").addEventListener("click", loadDayTask);
   $("#p-clear").addEventListener("click", () => { task = { ...X.emptyTask(), gates: task.gates, deadline: task.deadline }; insertAfter = -1; setAdding(true); changed(true); startMsg(); });
   $("#p-add").addEventListener("click", () => setAdding(!adding));
+  $("#p-scan").addEventListener("click", () => { if (camStream) stopCameraScan(); else startCameraScan(); });
+  $("#p-scan-stop").addEventListener("click", stopCameraScan);
+  $("#p-scan-flip").addEventListener("click", () => {
+    camFacing = camFacing === "environment" ? "user" : "environment";
+    startCameraScan(camFacing);
+  });
+  $<HTMLInputElement>("#p-qr-img").addEventListener("change", (e) => {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (f) importFile(f);
+    (e.target as HTMLInputElement).value = "";
+  });
   $<HTMLInputElement>("#p-file").addEventListener("change", (e) => {
     const f = (e.target as HTMLInputElement).files?.[0];
     if (f) importFile(f);
@@ -618,6 +653,48 @@ function expand() {
     try { apply(await X.parseAny("pasted.txt", text)); $("#p-paste-box").hidden = true; }
     catch (e) { msg(`Could not read it: ${(e as Error).message}`); }
   });
+  // Drag-and-drop task files or QR screenshots onto the planner
+  box.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    box.classList.add("drop-over");
+  });
+  box.addEventListener("dragleave", (e) => {
+    if (e.target === box) box.classList.remove("drop-over");
+  });
+  box.addEventListener("drop", (e) => {
+    box.classList.remove("drop-over");
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return;
+    e.preventDefault();
+    importFile(f);
+  });
+  // Paste a QR screenshot (Cmd/Ctrl+V) or raw XCTSK text anywhere while the planner is open
+  if (onPasteRef) window.removeEventListener("paste", onPasteRef);
+  onPasteRef = (e: ClipboardEvent) => {
+    if (!el) return;
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const imgItem = items.find((it) => it.type.startsWith("image/"));
+    if (imgItem) {
+      const file = imgItem.getAsFile();
+      if (file) {
+        e.preventDefault();
+        importFile(new File([file], file.name || "pasted-qr.png", { type: file.type }));
+      }
+      return;
+    }
+    const target = e.target as HTMLElement | null;
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+    const txt = e.clipboardData?.getData("text/plain")?.trim() ?? "";
+    if (txt.startsWith("XCTSK:")) {
+      e.preventDefault();
+      X.parseAny("pasted-qr.txt", txt).then(apply).catch((err) => msg(`Could not read pasted QR: ${(err as Error).message}`));
+    }
+  };
+  window.addEventListener("paste", onPasteRef);
+  if (onVisRef) document.removeEventListener("visibilitychange", onVisRef);
+  onVisRef = () => { if (document.hidden) stopCameraScan(); };
+  document.addEventListener("visibilitychange", onVisRef);
   $<HTMLInputElement>("#p-start").addEventListener("change", (e) => {
     const v = (e.target as HTMLInputElement).value;
     task.gates = v ? [toUtc(v)] : [];
@@ -1053,10 +1130,14 @@ function apply(p: X.Parsed) {
   }
 }
 
+function isImageFile(f: File): boolean {
+  return f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|heic|heif)$/i.test(f.name);
+}
+
 async function importFile(f: File) {
   try {
     let text: string;
-    if (f.type.startsWith("image/")) {
+    if (isImageFile(f)) {
       msg("Looking for a QR code in the image…");
       text = await readQR(f);
     } else {
@@ -1070,27 +1151,216 @@ async function importFile(f: File) {
   }
 }
 
-async function readQR(f: File): Promise<string> {
-  const bmp = await createImageBitmap(f);
-  const Detector = (window as unknown as { BarcodeDetector?: new (o: object) => { detect: (s: ImageBitmap) => Promise<{ rawValue: string }[]> } }).BarcodeDetector;
-  if (Detector) {
+type BarcodeDetectorLike = { detect: (src: ImageBitmapSource) => Promise<{ rawValue?: string }[]> };
+type BarcodeDetectorCtor = new (opts: { formats: string[] }) => BarcodeDetectorLike;
+
+function getBarcodeDetector(): BarcodeDetectorLike | null {
+  const Ctor = (window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector;
+  if (!Ctor) return null;
+  try { return new Ctor({ formats: ["qr_code"] }); }
+  catch { return null; }
+}
+
+function decodeCanvasQR(
+  jsQR: (data: Uint8ClampedArray, w: number, h: number, opts?: { inversionAttempts?: "dontInvert" | "onlyInvert" | "attemptBoth" | "invertFirst" }) => { binaryData: number[]; data: string } | null,
+  canvas: HTMLCanvasElement,
+  ctx2d: CanvasRenderingContext2D,
+): string | null {
+  const r = jsQR(ctx2d.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height, { inversionAttempts: "attemptBoth" });
+  if (!r) return null;
+  return r.binaryData?.length ? new TextDecoder().decode(new Uint8Array(r.binaryData)) : r.data;
+}
+
+async function loadImageSource(f: File): Promise<{ src: CanvasImageSource; width: number; height: number; release: () => void }> {
+  if (typeof createImageBitmap === "function") {
     try {
-      const codes = await new Detector({ formats: ["qr_code"] }).detect(bmp);
-      if (codes[0]?.rawValue) return codes[0].rawValue;
-    } catch { /* fall back to jsQR */ }
+      const bmp = await createImageBitmap(f);
+      return { src: bmp, width: bmp.width, height: bmp.height, release: () => bmp.close() };
+    } catch { /* fall back to HTMLImageElement */ }
   }
-  const { default: jsQR } = await import("jsqr");
-  for (const size of [1600, 1000, 2400, 700]) {
-    const s = Math.min(1, size / Math.max(bmp.width, bmp.height));
-    const w = Math.round(bmp.width * s), h = Math.round(bmp.height * s);
+  const url = URL.createObjectURL(f);
+  const img = new Image();
+  img.decoding = "async";
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("could not decode image"));
+    img.src = url;
+  });
+  return { src: img, width: img.naturalWidth, height: img.naturalHeight, release: () => URL.revokeObjectURL(url) };
+}
+
+async function readQR(f: File): Promise<string> {
+  const loaded = await loadImageSource(f);
+  try {
+    const detector = getBarcodeDetector();
+    if (detector) {
+      try {
+        const codes = await detector.detect(loaded.src as ImageBitmapSource);
+        if (codes[0]?.rawValue) return codes[0].rawValue;
+      } catch { /* fall back to jsQR */ }
+    }
+    const { default: jsQR } = await import("jsqr");
     const c = document.createElement("canvas");
-    c.width = w; c.height = h;
     const g = c.getContext("2d", { willReadFrequently: true })!;
-    g.drawImage(bmp, 0, 0, w, h);
-    const r = jsQR(g.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: "attemptBoth" });
-    if (r) return new TextDecoder().decode(new Uint8Array(r.binaryData));
+    for (const size of [1600, 1000, 2400, 700]) {
+      const s = Math.min(1, size / Math.max(loaded.width, loaded.height));
+      const w = Math.max(1, Math.round(loaded.width * s));
+      const h = Math.max(1, Math.round(loaded.height * s));
+      c.width = w;
+      c.height = h;
+      g.drawImage(loaded.src, 0, 0, w, h);
+      const hit = decodeCanvasQR(jsQR, c, g);
+      if (hit) return hit;
+    }
+    // Second pass: centered crop for full-screen phone screenshots with UI chrome around the QR
+    const side = Math.round(Math.min(loaded.width, loaded.height) * 0.75);
+    const sx = Math.round((loaded.width - side) / 2);
+    const sy = Math.round((loaded.height - side) / 2);
+    const out = Math.min(1200, side);
+    c.width = out;
+    c.height = out;
+    g.drawImage(loaded.src, sx, sy, side, side, 0, 0, out, out);
+    const cropHit = decodeCanvasQR(jsQR, c, g);
+    if (cropHit) return cropHit;
+    throw new Error("no QR code found in the image");
+  } finally {
+    loaded.release();
   }
-  throw new Error("no QR code found in the image");
+}
+
+function stopCameraScan() {
+  camToken++;
+  if (camTimer) { window.clearTimeout(camTimer); camTimer = 0; }
+  if (camStream) {
+    camStream.getTracks().forEach((t) => t.stop());
+    camStream = null;
+  }
+  if (el) {
+    const video = el.querySelector<HTMLVideoElement>("#p-scan-video");
+    if (video) video.srcObject = null;
+    const box = el.querySelector<HTMLElement>("#p-scan-box");
+    if (box) box.hidden = true;
+    const btn = el.querySelector<HTMLButtonElement>("#p-scan");
+    if (btn) {
+      btn.classList.remove("on");
+      btn.setAttribute("aria-pressed", "false");
+      btn.textContent = "Scan QR";
+    }
+  }
+}
+
+async function startCameraScan(facing: "environment" | "user" = camFacing) {
+  if (!el) return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    msg("Live camera needs HTTPS and camera access. Use QR image to upload a screenshot or photo instead.");
+    return;
+  }
+  stopCameraScan();
+  const token = ++camToken;
+  const btn = $<HTMLButtonElement>("#p-scan");
+  const box = $("#p-scan-box");
+  const video = $<HTMLVideoElement>("#p-scan-video");
+  const hint = $("#p-scan-hint");
+  const flipBtn = $<HTMLButtonElement>("#p-scan-flip");
+  btn.classList.add("on");
+  btn.setAttribute("aria-pressed", "true");
+  btn.textContent = "Scanning…";
+  box.hidden = false;
+  hint.textContent = "Starting camera…";
+
+  let stream: MediaStream;
+  try {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+    } catch (err) {
+      if ((err as DOMException)?.name === "OverconstrainedError") {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      } else {
+        throw err;
+      }
+    }
+  } catch (err) {
+    stopCameraScan();
+    const name = (err as DOMException)?.name;
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      msg("Camera permission denied. Use QR image to upload a screenshot or photo instead.");
+    } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      msg("No camera found. Use QR image to upload a screenshot or photo instead.");
+    } else {
+      msg(`Could not start camera: ${(err as Error).message || name || "unknown error"}. Try QR image instead.`);
+    }
+    return;
+  }
+
+  if (token !== camToken || !el) {
+    stream.getTracks().forEach((t) => t.stop());
+    return;
+  }
+  camStream = stream;
+  video.srcObject = stream;
+  try { await video.play(); } catch { /* autoplay muted should succeed; scan loop waits for videoWidth */ }
+
+  hint.textContent = "Point the camera at an XCTrack task QR code.";
+  navigator.mediaDevices.enumerateDevices?.().then((devs) => {
+    if (token !== camToken || !el) return;
+    flipBtn.hidden = devs.filter((d) => d.kind === "videoinput").length < 2;
+  }).catch(() => {});
+
+  const detector = getBarcodeDetector();
+  let jsQRMod: (typeof import("jsqr"))["default"] | null = null;
+  const canvas = document.createElement("canvas");
+  const g = canvas.getContext("2d", { willReadFrequently: true })!;
+
+  const tick = async () => {
+    if (token !== camToken || !el || !camStream) return;
+    try {
+      if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+        let found: string | null = null;
+        if (detector) {
+          try {
+            const codes = await detector.detect(video);
+            found = codes[0]?.rawValue ?? null;
+          } catch { /* fall back to jsQR */ }
+        }
+        if (!found) {
+          jsQRMod ??= (await import("jsqr")).default;
+          const s = Math.min(1, 900 / Math.max(video.videoWidth, video.videoHeight));
+          const w = Math.max(1, Math.round(video.videoWidth * s));
+          const h = Math.max(1, Math.round(video.videoHeight * s));
+          canvas.width = w;
+          canvas.height = h;
+          g.drawImage(video, 0, 0, w, h);
+          found = decodeCanvasQR(jsQRMod, canvas, g);
+          if (!found) {
+            const side = Math.round(Math.min(video.videoWidth, video.videoHeight) * 0.65);
+            const sx = Math.round((video.videoWidth - side) / 2);
+            const sy = Math.round((video.videoHeight - side) / 2);
+            const out = Math.min(640, side);
+            canvas.width = out;
+            canvas.height = out;
+            g.drawImage(video, sx, sy, side, side, 0, 0, out, out);
+            found = decodeCanvasQR(jsQRMod, canvas, g);
+          }
+        }
+        if (found && token === camToken && el) {
+          stopCameraScan();
+          try {
+            apply(await X.parseAny("camera-qr.txt", found));
+          } catch (err) {
+            msg(`QR scanned, but it is not a task: ${(err as Error).message}`);
+          }
+          return;
+        }
+      }
+    } catch { /* keep scanning */ }
+    if (token === camToken && el && camStream) {
+      camTimer = window.setTimeout(tick, 160);
+    }
+  };
+  camTimer = window.setTimeout(tick, 180);
 }
 
 /** The task with a name on every turnpoint, as instruments need. */
