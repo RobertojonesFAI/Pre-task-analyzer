@@ -362,7 +362,7 @@ def _predict_forecast(req: Request, site: dict, data: dict, task: dict, pts: lis
 
     if not model_results:
         reasons = "; ".join(f"{s['id']}: {s['reason']}" for s in skipped) or "no data"
-        raise HTTPException(502, f"no forecast models returned data for {target_date}: {reasons}")
+        raise HTTPException(503, f"no forecast models returned data for {target_date}: {reasons}")
 
     blend, wx_med = _blend_predictions(model_results, wx_spec.weights)
     return {
