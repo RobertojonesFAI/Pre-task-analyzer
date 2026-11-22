@@ -6,6 +6,7 @@
 import * as maplibregl from "maplibre-gl";
 import QRCode from "qrcode";
 import * as X from "./xctask";
+import { decodeQRFromFile, startCameraQR, type CameraScanner } from "./qr";
 import {
   API,
   apiAvailable,
@@ -76,10 +77,7 @@ let fcIncluded = new Set<string>();
 let lastForecast: Prediction | null = null;
 
 // Live camera QR scanner & global listeners
-let camStream: MediaStream | null = null;
-let camFacing: "environment" | "user" = "environment";
-let camToken = 0;
-let camTimer = 0;
+let scanner: CameraScanner | null = null;
 let onPasteRef: ((e: ClipboardEvent) => void) | null = null;
 let onVisRef: (() => void) | null = null;
 
@@ -554,8 +552,8 @@ function expand() {
       <button id="p-tpl"${c.days.length ? "" : " disabled"}>That day's task</button>
       <button id="p-clear">Clear</button>
       <button id="p-add" aria-pressed="false">Add on the map</button>
-      <button type="button" id="p-scan" aria-pressed="false" title="Scan an XCTrack QR code with your phone or laptop camera">Scan QR</button>
-      <label class="file-btn" title="Upload a screenshot or photo of a task QR code">QR image<input type="file" id="p-qr-img" accept="image/*"></label>
+      <button type="button" id="p-scan" aria-pressed="false" title="Scan an XCTrack or SeeYou task QR code live with your phone or laptop camera">Scan QR</button>
+      <label class="file-btn" title="Upload a screenshot or photo of a task QR code">Upload QR image<input type="file" id="p-qr-img" accept="image/*"></label>
       <label class="file-btn" title="Import .xctsk, .cup, .wpt, .gpx, or a QR image">Import file…<input type="file" id="p-file" accept=".xctsk,.cup,.wpt,.gpx,.txt,.json,image/*"></label>
       <button id="p-paste">Paste QR text</button>
     </div>
@@ -568,7 +566,7 @@ function expand() {
         <button type="button" id="p-scan-flip" hidden>Flip camera</button>
         <button type="button" id="p-scan-stop">Stop camera</button>
       </div>
-      <p class="hint" id="p-scan-hint">Point the camera at an XCTrack task QR code.</p>
+      <p class="hint" id="p-scan-hint">Point the camera at a task QR code — it loads automatically.</p>
     </div>
     <div class="paste" id="p-paste-box" hidden>
       <textarea id="p-paste-text" rows="3" placeholder="XCTSK:{…} or the contents of a task file (or paste a QR screenshot anywhere with Ctrl/Cmd+V)"></textarea>
@@ -631,12 +629,9 @@ function expand() {
   $("#p-tpl").addEventListener("click", loadDayTask);
   $("#p-clear").addEventListener("click", () => { task = { ...X.emptyTask(), gates: task.gates, deadline: task.deadline }; insertAfter = -1; setAdding(true); changed(true); startMsg(); });
   $("#p-add").addEventListener("click", () => setAdding(!adding));
-  $("#p-scan").addEventListener("click", () => { if (camStream) stopCameraScan(); else startCameraScan(); });
+  $("#p-scan").addEventListener("click", () => { if (scanner?.active()) stopCameraScan(); else beginCameraScan(); });
   $("#p-scan-stop").addEventListener("click", stopCameraScan);
-  $("#p-scan-flip").addEventListener("click", () => {
-    camFacing = camFacing === "environment" ? "user" : "environment";
-    startCameraScan(camFacing);
-  });
+  $("#p-scan-flip").addEventListener("click", () => { scanner?.flip(); });
   $<HTMLInputElement>("#p-qr-img").addEventListener("change", (e) => {
     const f = (e.target as HTMLInputElement).files?.[0];
     if (f) importFile(f);
@@ -1134,129 +1129,61 @@ function isImageFile(f: File): boolean {
   return f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|heic|heif)$/i.test(f.name);
 }
 
+function qrSnippet(raw: string): string {
+  const clean = raw.replace(/\s+/g, " ").trim();
+  return clean.length > 60 ? `${clean.slice(0, 60)}…` : clean;
+}
+
 async function importFile(f: File) {
   try {
     let text: string;
-    if (isImageFile(f)) {
-      msg("Looking for a QR code in the image…");
-      text = await readQR(f);
+    const fromImage = isImageFile(f);
+    if (fromImage) {
+      msg("Reading QR code from the image…");
+      text = await decodeQRFromFile(f);
     } else {
       const buf = await f.arrayBuffer();
       try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
       catch { text = new TextDecoder("windows-1252").decode(buf); }   // older instruments write Latin-1
     }
-    apply(await X.parseAny(f.name, text));
+    try {
+      apply(await X.parseAny(f.name, text));
+    } catch (parseErr) {
+      if (fromImage) {
+        msg(`QR read ("${qrSnippet(text)}"), but it is not a supported task format: ${(parseErr as Error).message}`);
+      } else {
+        throw parseErr;
+      }
+    }
   } catch (e) {
     msg(`Could not read ${f.name}: ${(e as Error).message}`);
   }
 }
 
-type BarcodeDetectorLike = { detect: (src: ImageBitmapSource) => Promise<{ rawValue?: string }[]> };
-type BarcodeDetectorCtor = new (opts: { formats: string[] }) => BarcodeDetectorLike;
-
-function getBarcodeDetector(): BarcodeDetectorLike | null {
-  const Ctor = (window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector;
-  if (!Ctor) return null;
-  try { return new Ctor({ formats: ["qr_code"] }); }
-  catch { return null; }
-}
-
-function decodeCanvasQR(
-  jsQR: (data: Uint8ClampedArray, w: number, h: number, opts?: { inversionAttempts?: "dontInvert" | "onlyInvert" | "attemptBoth" | "invertFirst" }) => { binaryData: number[]; data: string } | null,
-  canvas: HTMLCanvasElement,
-  ctx2d: CanvasRenderingContext2D,
-): string | null {
-  const r = jsQR(ctx2d.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height, { inversionAttempts: "attemptBoth" });
-  if (!r) return null;
-  return r.binaryData?.length ? new TextDecoder().decode(new Uint8Array(r.binaryData)) : r.data;
-}
-
-async function loadImageSource(f: File): Promise<{ src: CanvasImageSource; width: number; height: number; release: () => void }> {
-  if (typeof createImageBitmap === "function") {
-    try {
-      const bmp = await createImageBitmap(f);
-      return { src: bmp, width: bmp.width, height: bmp.height, release: () => bmp.close() };
-    } catch { /* fall back to HTMLImageElement */ }
-  }
-  const url = URL.createObjectURL(f);
-  const img = new Image();
-  img.decoding = "async";
-  await new Promise<void>((resolve, reject) => {
-    img.onload = () => resolve();
-    img.onerror = () => reject(new Error("could not decode image"));
-    img.src = url;
-  });
-  return { src: img, width: img.naturalWidth, height: img.naturalHeight, release: () => URL.revokeObjectURL(url) };
-}
-
-async function readQR(f: File): Promise<string> {
-  const loaded = await loadImageSource(f);
-  try {
-    const detector = getBarcodeDetector();
-    if (detector) {
-      try {
-        const codes = await detector.detect(loaded.src as ImageBitmapSource);
-        if (codes[0]?.rawValue) return codes[0].rawValue;
-      } catch { /* fall back to jsQR */ }
-    }
-    const { default: jsQR } = await import("jsqr");
-    const c = document.createElement("canvas");
-    const g = c.getContext("2d", { willReadFrequently: true })!;
-    for (const size of [1600, 1000, 2400, 700]) {
-      const s = Math.min(1, size / Math.max(loaded.width, loaded.height));
-      const w = Math.max(1, Math.round(loaded.width * s));
-      const h = Math.max(1, Math.round(loaded.height * s));
-      c.width = w;
-      c.height = h;
-      g.drawImage(loaded.src, 0, 0, w, h);
-      const hit = decodeCanvasQR(jsQR, c, g);
-      if (hit) return hit;
-    }
-    // Second pass: centered crop for full-screen phone screenshots with UI chrome around the QR
-    const side = Math.round(Math.min(loaded.width, loaded.height) * 0.75);
-    const sx = Math.round((loaded.width - side) / 2);
-    const sy = Math.round((loaded.height - side) / 2);
-    const out = Math.min(1200, side);
-    c.width = out;
-    c.height = out;
-    g.drawImage(loaded.src, sx, sy, side, side, 0, 0, out, out);
-    const cropHit = decodeCanvasQR(jsQR, c, g);
-    if (cropHit) return cropHit;
-    throw new Error("no QR code found in the image");
-  } finally {
-    loaded.release();
+function resetScanUI() {
+  if (!el) return;
+  const box = el.querySelector<HTMLElement>("#p-scan-box");
+  if (box) box.hidden = true;
+  const flipBtn = el.querySelector<HTMLButtonElement>("#p-scan-flip");
+  if (flipBtn) flipBtn.hidden = true;
+  const btn = el.querySelector<HTMLButtonElement>("#p-scan");
+  if (btn) {
+    btn.classList.remove("on");
+    btn.setAttribute("aria-pressed", "false");
+    btn.textContent = "Scan QR";
   }
 }
 
 function stopCameraScan() {
-  camToken++;
-  if (camTimer) { window.clearTimeout(camTimer); camTimer = 0; }
-  if (camStream) {
-    camStream.getTracks().forEach((t) => t.stop());
-    camStream = null;
-  }
-  if (el) {
-    const video = el.querySelector<HTMLVideoElement>("#p-scan-video");
-    if (video) video.srcObject = null;
-    const box = el.querySelector<HTMLElement>("#p-scan-box");
-    if (box) box.hidden = true;
-    const btn = el.querySelector<HTMLButtonElement>("#p-scan");
-    if (btn) {
-      btn.classList.remove("on");
-      btn.setAttribute("aria-pressed", "false");
-      btn.textContent = "Scan QR";
-    }
-  }
+  const s = scanner;
+  scanner = null;
+  s?.stop();
+  resetScanUI();
 }
 
-async function startCameraScan(facing: "environment" | "user" = camFacing) {
+async function beginCameraScan() {
   if (!el) return;
-  if (!navigator.mediaDevices?.getUserMedia) {
-    msg("Live camera needs HTTPS and camera access. Use QR image to upload a screenshot or photo instead.");
-    return;
-  }
   stopCameraScan();
-  const token = ++camToken;
   const btn = $<HTMLButtonElement>("#p-scan");
   const box = $("#p-scan-box");
   const video = $<HTMLVideoElement>("#p-scan-video");
@@ -1266,101 +1193,34 @@ async function startCameraScan(facing: "environment" | "user" = camFacing) {
   btn.setAttribute("aria-pressed", "true");
   btn.textContent = "Scanning…";
   box.hidden = false;
-  hint.textContent = "Starting camera…";
+  box.scrollIntoView({ block: "nearest", behavior: "smooth" });
 
-  let stream: MediaStream;
-  try {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
-    } catch (err) {
-      if ((err as DOMException)?.name === "OverconstrainedError") {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      } else {
-        throw err;
+  const s = await startCameraQR({
+    video,
+    onStatus: (t) => { if (el) hint.textContent = t; },
+    onMultiCamera: (hasMulti) => { if (el) flipBtn.hidden = !hasMulti; },
+    onDetect: async (decoded) => {
+      scanner = null;
+      resetScanUI();
+      if (!el) return;
+      try {
+        apply(await X.parseAny("camera-qr.txt", decoded));
+      } catch (err) {
+        msg(`QR scanned ("${qrSnippet(decoded)}"), but it is not a supported task format: ${(err as Error).message}`);
       }
-    }
-  } catch (err) {
-    stopCameraScan();
-    const name = (err as DOMException)?.name;
-    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-      msg("Camera permission denied. Use QR image to upload a screenshot or photo instead.");
-    } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
-      msg("No camera found. Use QR image to upload a screenshot or photo instead.");
-    } else {
-      msg(`Could not start camera: ${(err as Error).message || name || "unknown error"}. Try QR image instead.`);
-    }
-    return;
-  }
-
-  if (token !== camToken || !el) {
-    stream.getTracks().forEach((t) => t.stop());
-    return;
-  }
-  camStream = stream;
-  video.srcObject = stream;
-  try { await video.play(); } catch { /* autoplay muted should succeed; scan loop waits for videoWidth */ }
-
-  hint.textContent = "Point the camera at an XCTrack task QR code.";
-  navigator.mediaDevices.enumerateDevices?.().then((devs) => {
-    if (token !== camToken || !el) return;
-    flipBtn.hidden = devs.filter((d) => d.kind === "videoinput").length < 2;
-  }).catch(() => {});
-
-  const detector = getBarcodeDetector();
-  let jsQRMod: (typeof import("jsqr"))["default"] | null = null;
-  const canvas = document.createElement("canvas");
-  const g = canvas.getContext("2d", { willReadFrequently: true })!;
-
-  const tick = async () => {
-    if (token !== camToken || !el || !camStream) return;
-    try {
-      if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
-        let found: string | null = null;
-        if (detector) {
-          try {
-            const codes = await detector.detect(video);
-            found = codes[0]?.rawValue ?? null;
-          } catch { /* fall back to jsQR */ }
-        }
-        if (!found) {
-          jsQRMod ??= (await import("jsqr")).default;
-          const s = Math.min(1, 900 / Math.max(video.videoWidth, video.videoHeight));
-          const w = Math.max(1, Math.round(video.videoWidth * s));
-          const h = Math.max(1, Math.round(video.videoHeight * s));
-          canvas.width = w;
-          canvas.height = h;
-          g.drawImage(video, 0, 0, w, h);
-          found = decodeCanvasQR(jsQRMod, canvas, g);
-          if (!found) {
-            const side = Math.round(Math.min(video.videoWidth, video.videoHeight) * 0.65);
-            const sx = Math.round((video.videoWidth - side) / 2);
-            const sy = Math.round((video.videoHeight - side) / 2);
-            const out = Math.min(640, side);
-            canvas.width = out;
-            canvas.height = out;
-            g.drawImage(video, sx, sy, side, side, 0, 0, out, out);
-            found = decodeCanvasQR(jsQRMod, canvas, g);
-          }
-        }
-        if (found && token === camToken && el) {
-          stopCameraScan();
-          try {
-            apply(await X.parseAny("camera-qr.txt", found));
-          } catch (err) {
-            msg(`QR scanned, but it is not a task: ${(err as Error).message}`);
-          }
-          return;
-        }
-      }
-    } catch { /* keep scanning */ }
-    if (token === camToken && el && camStream) {
-      camTimer = window.setTimeout(tick, 160);
-    }
-  };
-  camTimer = window.setTimeout(tick, 180);
+    },
+    onError: (message) => {
+      scanner = null;
+      resetScanUI();
+      msg(message);
+    },
+    onStop: () => {
+      if (scanner === s) scanner = null;
+      resetScanUI();
+    },
+  });
+  if (s.active() && el) scanner = s;
+  else s.stop();
 }
 
 /** The task with a name on every turnpoint, as instruments need. */
