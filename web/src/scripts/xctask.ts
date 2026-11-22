@@ -337,9 +337,19 @@ export function toQR(task: Task): string {
 }
 
 async function inflate(b64: string): Promise<string> {
-  const bytes = Uint8Array.from(atob(b64.trim()), (c) => c.charCodeAt(0));
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
-  return await new Response(stream).text();
+  let clean = b64.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+  while (clean.length % 4) clean += "=";
+  const bytes = Uint8Array.from(atob(clean), (c) => c.charCodeAt(0));
+  let lastErr: unknown;
+  for (const fmt of ["deflate", "deflate-raw", "gzip"] as CompressionFormat[]) {
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream(fmt));
+      return await new Response(stream).text();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("could not decompress XCTSKZ payload");
 }
 
 /** The v2 task (QR codes): a competition task, or a plain route of waypoints ("T": "W"). */
@@ -367,11 +377,13 @@ function fromV2(o: any): Task {
 }
 
 export async function parseQR(text: string): Promise<Task> {
-  const s = text.trim();
+  const s = text.replace(/^\uFEFF/, "").trim();
   let json: string;
   if (/^XCTSKZ:/i.test(s)) json = await inflate(s.slice(7));
-  else if (/^XCTSK:/i.test(s)) json = s.slice(6);
-  else throw new Error("not an XCTrack QR code");
+  else if (/^XCTSK:/i.test(s)) {
+    const body = s.slice(6).trim();
+    json = body.startsWith("%7B") || body.startsWith("%7b") ? decodeURIComponent(body) : body;
+  } else throw new Error("not an XCTrack QR code");
   const o = JSON.parse(json);
   return Array.isArray(o.turnpoints) ? fromXctskObject(o) : fromV2(o);   // some apps put a v1 task in the QR
 }
