@@ -49,10 +49,11 @@ from pta import grid  # noqa: E402
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 CACHE_TTL_S = 3600       # 1 h cache per (chip_id, open-meteo model slug)
 CACHE_MAX_ITEMS = 800
-HTTP_TIMEOUT_S = 14
+HTTP_TIMEOUT_S = 18
 MAX_FORECAST_DAYS = 7    # today through +6 days (UTC); request 8 days so western tasks crossing 00 UTC stay covered
 FETCH_FORECAST_DAYS = 8
-MAX_WORKERS = 8
+MAX_WORKERS = 2          # stay comfortably under Open-Meteo's burst rate limit (HTTP 429)
+MIN_REQUEST_GAP_S = 0.12
 
 LOG = logging.getLogger("uvicorn.error")
 
@@ -310,26 +311,53 @@ class _IPv4HTTPSConnection(http.client.HTTPSConnection):
             raise last_err
 
 
+_SSL_CTX = ssl.create_default_context()
+_HTTP_SEM = threading.Semaphore(MAX_WORKERS)
+_RATE_LOCK = threading.Lock()
+_LAST_REQ_AT = 0.0
+
+
 class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        return self.do_open(_IPv4HTTPSConnection, req, context=ssl.create_default_context())
+        return self.do_open(_IPv4HTTPSConnection, req, context=_SSL_CTX)
 
 
 _OPENER = urllib.request.build_opener(_IPv4HTTPSHandler)
+
+
+def _pace_request() -> None:
+    global _LAST_REQ_AT
+    with _RATE_LOCK:
+        now = time.monotonic()
+        wait = MIN_REQUEST_GAP_S - (now - _LAST_REQ_AT)
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_REQ_AT = time.monotonic()
 
 
 def _http_get_json(params: dict[str, Any]) -> Any:
     url = f"{OPEN_METEO_URL}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept-Encoding": "gzip", "User-Agent": "pre-task-analyzer/1"})
     last_err: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
-            with _OPENER.open(req, timeout=HTTP_TIMEOUT_S) as resp:
-                raw = resp.read()
-                if resp.headers.get("Content-Encoding", "").lower() == "gzip":
-                    raw = gzip.decompress(raw)
-                return json.loads(raw.decode("utf-8"))
-        except urllib.error.HTTPError:
+            with _HTTP_SEM:
+                _pace_request()
+                with _OPENER.open(req, timeout=HTTP_TIMEOUT_S) as resp:
+                    raw = resp.read()
+                    if resp.headers.get("Content-Encoding", "").lower() == "gzip":
+                        raw = gzip.decompress(raw)
+                    return json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < 2:
+                retry_hdr = exc.headers.get("Retry-After") if exc.headers else None
+                try:
+                    delay = min(4.0, max(1.0, float(retry_hdr))) if retry_hdr else 1.5 * (attempt + 1)
+                except ValueError:
+                    delay = 1.5 * (attempt + 1)
+                time.sleep(delay)
+                last_err = exc
+                continue
             raise
         except TimeoutError as exc:
             # Avoid doubling latency when a single upstream model stalls.
@@ -339,11 +367,15 @@ def _http_get_json(params: dict[str, Any]) -> Any:
                 raise RuntimeError(f"Open-Meteo timed out after {HTTP_TIMEOUT_S}s") from exc
             last_err = exc
             if attempt == 0:
-                time.sleep(0.3)
+                time.sleep(0.4)
+                continue
+            break
         except Exception as exc:
             last_err = exc
             if attempt == 0:
-                time.sleep(0.3)
+                time.sleep(0.4)
+                continue
+            break
     raise RuntimeError(f"Open-Meteo request failed: {last_err}")
 
 
@@ -480,6 +512,8 @@ def _ensure_cached(chips: list[int], slugs: list[str]) -> dict[str, str]:
         "forecast fetch: %d chips, %d/%d slugs in %.2fs (failed %d)",
         len(chips), len(missing_by_slug) - len(errors), len(slugs), dt, len(errors),
     )
+    if errors:
+        LOG.warning("forecast fetch errors: %s", errors)
     return errors
 
 
