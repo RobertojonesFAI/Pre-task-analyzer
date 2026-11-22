@@ -52,8 +52,8 @@ from pta import grid  # noqa: E402
 HIST_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 LEVELS = [925, 850, 700, 600, 500]
 CALM_MS = 3.0
-MERGE_GAP_DAYS = 14        # merge dates within 14 days into one API request window
-MAX_WINDOW_DAYS = 45       # cap window length so responses stay compact
+MERGE_GAP_DAYS = 2         # only bridge <= 2-day gaps inside one competition week (avoid paying for empty days)
+MAX_WINDOW_DAYS = 14       # cap window length at 14 days so Open-Meteo's day-range weighting stays minimal
 BATCH_CHIPS = 8            # chips per multi-coordinate request sharing a window
 CHECKPOINT_EVERY = 20      # flush parquet cache to Drive every N batches
 HTTP_TIMEOUT_S = 35
@@ -120,15 +120,28 @@ class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
 _OPENER = urllib.request.build_opener(_IPv4HTTPSHandler)
 
 
-class DailyQuotaExceeded(RuntimeError):
-    """Raised when Open-Meteo reports a daily API quota limit so progress is saved cleanly."""
+class QuotaExceeded(RuntimeError):
+    """Raised when Open-Meteo reports an hourly or daily API quota limit so progress is saved cleanly."""
+
+
+DailyQuotaExceeded = QuotaExceeded
+
+
+def _extract_error_reason(body: str) -> str:
+    try:
+        obj = json.loads(body)
+        if isinstance(obj, dict) and obj.get("reason"):
+            return str(obj["reason"])
+    except Exception:
+        pass
+    return body.strip()[:200] or "Too Many Requests"
 
 
 def _http_get_json(params: dict[str, Any]) -> Any:
     url = f"{HIST_FORECAST_URL}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept-Encoding": "gzip", "User-Agent": "pre-task-analyzer-hist/1"})
     last_err: Exception | None = None
-    for attempt in range(5):
+    for attempt in range(4):
         try:
             with _OPENER.open(req, timeout=HTTP_TIMEOUT_S) as resp:
                 raw = resp.read()
@@ -138,14 +151,20 @@ def _http_get_json(params: dict[str, Any]) -> Any:
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             if exc.code == 429:
-                if "daily" in body.lower():
-                    raise DailyQuotaExceeded(body[:200]) from exc
+                reason = _extract_error_reason(body)
                 retry_hdr = exc.headers.get("Retry-After") if exc.headers else None
-                try:
-                    delay = min(30.0, max(2.0, float(retry_hdr))) if retry_hdr else min(30.0, 2.5 * (2 ** attempt))
-                except ValueError:
-                    delay = min(30.0, 2.5 * (2 ** attempt))
-                print(f"    429 rate-limited, waiting {delay:.1f}s...", flush=True)
+                retry_s: float | None = None
+                if retry_hdr:
+                    try:
+                        retry_s = float(retry_hdr)
+                    except ValueError:
+                        retry_s = None
+                low = reason.lower()
+                if "daily" in low or "hourly" in low or (retry_s is not None and retry_s > 90.0):
+                    extra = f" (Retry-After={retry_hdr}s)" if retry_hdr else ""
+                    raise QuotaExceeded(f"{reason}{extra}") from exc
+                delay = min(65.0, max(3.0, retry_s)) if retry_s is not None else min(60.0, 3.0 * (2 ** attempt))
+                print(f"    429 ({reason[:120]}), waiting {delay:.1f}s...", flush=True)
                 time.sleep(delay)
                 last_err = exc
                 continue
@@ -202,7 +221,7 @@ def _vars_for_model(spec: dict[str, Any]) -> list[str]:
 
 # ── Step 1: Load groups.parquet + attach event_key, region, ground_m ─────────
 
-def load_groups(db: Path, from_year: int, max_sites: int | None = None) -> pd.DataFrame:
+def load_groups(db: Path, from_year: int, max_sites: int | None = None, min_chip_groups: int = 1) -> pd.DataFrame:
     gp = db / "models" / "wind_check" / "groups.parquet"
     if not gp.exists():
         raise SystemExit(f"Missing {gp}. Run notebook 11 (wind_check.py) first.")
@@ -252,6 +271,11 @@ def load_groups(db: Path, from_year: int, max_sites: int | None = None) -> pd.Da
         top_sites = g.groupby("site_id").size().sort_values(ascending=False).head(max_sites).index
         g = g[g["site_id"].isin(top_sites)].copy()
 
+    if min_chip_groups > 1:
+        counts = g.groupby("chip_id").size()
+        keep_chips = counts[counts >= min_chip_groups].index
+        g = g[g["chip_id"].isin(keep_chips)].copy()
+
     return g.reset_index(drop=True)
 
 
@@ -274,18 +298,57 @@ def _merge_date_windows(dates: list[date]) -> list[tuple[date, date]]:
     return windows
 
 
+def _parse_covered_intervals(done_keys: set[str]) -> dict[int, list[tuple[date, date]]]:
+    """Parse 'chip_id|start|end' done_keys into per-chip covered date intervals so prior caches
+    remain valid even when windowing parameters change."""
+    covered: dict[int, list[tuple[date, date]]] = {}
+    for key in done_keys:
+        parts = key.split("|")
+        if len(parts) != 3:
+            continue
+        try:
+            cid = int(parts[0])
+            d0 = date.fromisoformat(parts[1])
+            d1 = date.fromisoformat(parts[2])
+        except ValueError:
+            continue
+        covered.setdefault(cid, []).append((d0, d1))
+    return covered
+
+
+def _is_date_covered(d: date, intervals: list[tuple[date, date]]) -> bool:
+    return any(d0 <= d <= d1 for d0, d1 in intervals)
+
+
 def _plan_batches(g_sub: pd.DataFrame, done_keys: set[str]) -> list[tuple[str, str, list[int]]]:
-    """Build (start_iso, end_iso, [chip_ids]) download batches not already recorded in done_keys."""
-    # Group by site first so nearby chips from the same competition share one date window.
+    """Build compact (start_iso, end_iso, [chip_ids]) download batches for uncovered (chip, date) pairs.
+
+    Avoids both cross-year chip Cartesian products and re-fetching dates already covered by wider
+    intervals in done_keys.
+    """
+    covered = _parse_covered_intervals(done_keys)
+    # Deduplicate on (chip_id, date) first so neighboring sites never double-fetch the same chip-day.
+    pairs = g_sub[["site_id", "chip_id", "date"]].drop_duplicates(["chip_id", "date"]).copy()
+    pairs["d_obj"] = [date.fromisoformat(s) for s in pairs["date"]]
+    keep = [
+        not _is_date_covered(d_obj, covered.get(int(cid), ()))
+        for cid, d_obj in zip(pairs["chip_id"], pairs["d_obj"])
+    ]
+    uncovered = pairs[keep]
+    if not len(uncovered):
+        return []
+
     by_window: dict[tuple[str, str], set[int]] = {}
-    for _, grp in g_sub.groupby("site_id"):
-        chips = sorted(grp["chip_id"].astype(int).unique())
-        dates = [date.fromisoformat(s) for s in grp["date"].unique()]
+    for _, grp in uncovered.groupby("site_id"):
+        dates = grp["d_obj"].tolist()
         for w0, w1 in _merge_date_windows(dates):
-            s0, s1 = str(w0), str(w1)
-            need_chips = [c for c in chips if f"{c}|{s0}|{s1}" not in done_keys]
-            if need_chips:
-                by_window.setdefault((s0, s1), set()).update(need_chips)
+            in_win = grp[(grp["d_obj"] >= w0) & (grp["d_obj"] <= w1)]
+            if not len(in_win):
+                continue
+            s0 = str(in_win["d_obj"].min())
+            s1 = str(in_win["d_obj"].max())
+            chips = [int(c) for c in in_win["chip_id"].unique()]
+            by_window.setdefault((s0, s1), set()).update(chips)
 
     batches: list[tuple[str, str, list[int]]] = []
     for (s0, s1), chip_set in sorted(by_window.items()):
@@ -397,6 +460,8 @@ def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Pat
     req_vars = ",".join(_vars_for_model(spec))
     new_frames: list[pd.DataFrame] = []
     quota_hit = False
+    quota_msg = ""
+    consecutive_429 = 0
     n_err = 0
 
     for idx, (s0, s1, chips) in enumerate(batches, 1):
@@ -413,6 +478,7 @@ def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Pat
                 "wind_speed_unit": "ms",
                 "timezone": "UTC",
             })
+            consecutive_429 = 0
             items = data if isinstance(data, list) else [data]
             if len(items) == len(chips):
                 df = _parse_batch_response(items, chips, spec, needed_hours)
@@ -420,11 +486,19 @@ def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Pat
                     new_frames.append(df)
                 for c in chips:
                     done_keys.add(f"{c}|{s0}|{s1}")
-        except DailyQuotaExceeded as exc:
-            print(f"    Open-Meteo daily quota reached at batch {idx}/{len(batches)}: {exc}", flush=True)
+        except QuotaExceeded as exc:
+            print(f"    Open-Meteo quota reached at batch {idx}/{len(batches)}: {exc}", flush=True)
             quota_hit = True
+            quota_msg = str(exc)
             break
         except Exception as exc:
+            if "429" in str(exc):
+                consecutive_429 += 1
+                if consecutive_429 >= 2:
+                    quota_msg = f"repeated HTTP 429 rate limits at batch {idx}/{len(batches)}"
+                    print(f"    Open-Meteo {quota_msg}; pausing cleanly.", flush=True)
+                    quota_hit = True
+                    break
             if "HTTP 400" in str(exc) and len(chips) > 1:
                 # A single edge chip outside a regional grid can cause HTTP 400 for the whole batch;
                 # retry chip-by-chip so valid chips in this batch are kept.
@@ -441,18 +515,26 @@ def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Pat
                             "wind_speed_unit": "ms",
                             "timezone": "UTC",
                         })
+                        consecutive_429 = 0
                         df1 = _parse_batch_response([d1] if isinstance(d1, dict) else d1, [c], spec, needed_hours)
                         if len(df1):
                             new_frames.append(df1)
                         done_keys.add(f"{c}|{s0}|{s1}")
-                    except DailyQuotaExceeded as qexc:
-                        print(f"    Open-Meteo daily quota reached during single-chip retry: {qexc}", flush=True)
+                    except QuotaExceeded as qexc:
+                        print(f"    Open-Meteo quota reached during single-chip retry: {qexc}", flush=True)
                         quota_hit = True
+                        quota_msg = str(qexc)
                         break
                     except Exception as exc1:
                         n_err += 1
                         if "HTTP 400" in str(exc1):
                             done_keys.add(f"{c}|{s0}|{s1}")
+                        if "429" in str(exc1):
+                            consecutive_429 += 1
+                            if consecutive_429 >= 2:
+                                quota_hit = True
+                                quota_msg = "repeated HTTP 429 during single-chip retry"
+                                break
                         if n_err <= 5:
                             print(f"    chip {c} ({s0}..{s1}) skipped: {exc1}", flush=True)
                     if pause > 0:
@@ -478,7 +560,7 @@ def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Pat
     if new_frames or quota_hit:
         existing = _save_cache(cache_path, done_path, existing, new_frames, done_keys)
     if quota_hit:
-        raise DailyQuotaExceeded(f"Saved progress for {mid}. Re-run later to finish remaining batches.")
+        raise QuotaExceeded(f"Saved progress for {mid} ({quota_msg}). Re-run this cell once the hourly/daily quota resets.")
     return existing
 
 
@@ -824,6 +906,8 @@ def main() -> None:
     parser.add_argument("--models", type=str, default="all", help="comma-separated model ids or 'all'")
     parser.add_argument("--pause", type=float, default=0.4, help="seconds between Open-Meteo requests (default 0.4)")
     parser.add_argument("--max-sites", type=int, default=None, help="limit to top N sites by group count (smoke test)")
+    parser.add_argument("--min-chip-groups", type=int, default=1, help="drop chips with fewer than N groups (default 1)")
+    parser.add_argument("--download-only", action="store_true", help="only download/update caches for --models; skip scoring")
     parser.add_argument("--skip-download", action="store_true", help="score using already cached parquets only")
     args = parser.parse_args()
 
@@ -836,7 +920,7 @@ def main() -> None:
     if not selected:
         raise SystemExit(f"No valid models in --models={args.models!r}. Valid: {list(MODEL_BY_ID)}")
 
-    g = load_groups(args.db, from_year=args.from_year, max_sites=args.max_sites)
+    g = load_groups(args.db, from_year=args.from_year, max_sites=args.max_sites, min_chip_groups=args.min_chip_groups)
     print(
         f"Loaded {len(g):,} wind groups since {args.from_year} across {g['site_id'].nunique()} sites "
         f"and {g['event_key'].nunique()} competitions "
@@ -858,11 +942,15 @@ def main() -> None:
         else:
             try:
                 wx = download_model_history(g, spec, cache_dir, pause=args.pause)
-            except DailyQuotaExceeded as exc:
+            except QuotaExceeded as exc:
                 print(
                     f"\n[PAUSED] {exc}\n"
                     f"         All downloaded batches are saved in {cache_dir}.\n"
-                    "         Scoring models cached so far; re-run later to finish remaining batches.\n",
+                    + (
+                        "         Re-run this cell once Open-Meteo's hourly/daily quota resets.\n"
+                        if args.download_only
+                        else "         Scoring models cached so far; re-run later to finish remaining batches.\n"
+                    ),
                     flush=True,
                 )
                 quota_stopped = True
@@ -870,10 +958,20 @@ def main() -> None:
                 if len(wx):
                     wx["hour"] = pd.to_datetime(wx["hour"]).astype("datetime64[ns]")
         model_tables[mid] = wx
+        if args.download_only:
+            continue
         u, v = interpolate_model_wind(g, wx)
         g[f"{mid}_u"] = u.astype(np.float32)
         g[f"{mid}_v"] = v.astype(np.float32)
         g[f"{mid}_err"] = np.hypot(g["pilot_u"] - u, g["pilot_v"] - v).astype(np.float32)
+
+    if args.download_only:
+        print("\nCache summary:")
+        for spec in selected:
+            mid = spec["id"]
+            wx = model_tables[mid]
+            print(f"  {mid:12s}: {len(wx):,} cached chip-hours" + (" (paused at quota)" if quota_stopped else " (done)"))
+        return
 
     g.to_parquet(out / "matched_groups.parquet", index=False)
 
