@@ -2,7 +2,7 @@
 
 What each step has produced on the full database, in the order the notebooks run. Numbers are copied from the notebooks' output; `results/` holds the statistics and maps generated from the database itself (notebook 12). Both are refreshed every 10 to 15 commits.
 
-Last update: 18 November 2026 (09 and 13 added).
+Last update: 24 November 2026 (15 added).
 
 ## Database
 
@@ -120,3 +120,13 @@ The same 2,099 tasks (1,811 with a winner's time) as the baseline, with the weat
 - The weather improves the winner's speed by about 10% (4.9 to 4.4 km/h) and puts 58% of tasks within 15 minutes. What it uses most is the **wind along the route**: tailwind at 100 m and at 700 hPa come right after the site's history, then the boundary layer and the lapse rate.
 - The goal share barely moves. The committee already set each task for the forecast it had (longer tasks on better days), so the distance carries much of the weather; what is left depends on the pilots and on local conditions that 0.25° ERA5 averaged over five hours does not see.
 - Next: predict each pilot's result (goal or not, time) from the pilot's rating and glider and the weather, and add them up into the goal share: 173,280 results to learn from instead of 2,099 tasks. Also the weather by hour along the route (how the day develops), the wind at the pilots' height, and the thermal model's predictions along the legs.
+
+## IGC atmospheric truth (15)
+
+Calibrated multi-variable ground-truth dataset built directly from the 5 s `fixes/` across `149,052` unique flights (`2,523` tasks, `2,284,536` thermals, `2,458,498` vertical slices) without re-parsing raw zip archives (`scripts/build_igc_truth.py`, `pta/igc_truth.py`).
+
+- **Dual-DEM altitude calibration (`truth_flights`):** `80,226` `gold` (`53.8%`, `step <= 2 s`, median offset `11.4 m`, median takeoff–landing drift `9.3 m`), `33,157` `silver` (`22.2%`, landing-calibrated), and `35,669` `excluded` (`23.9%`, uncalibrated with median drift `278.1 m`).
+- **1 Hz raw IGC vs 5 s `fixes/` audit (`292` flights, `6,648` matched thermals):** verdict **`5s_sufficient`** — clean wind `RMSE = 0.115 m/s` (median `0.071 m/s`, bias `−0.0015 m/s`), peak 60 s core climb `MAE = 0.018 m/s` (`r = 0.9988`, bias `0.0`), 30 s core climb `MAE = 0.038 m/s` (`r = 0.9968`), thermal top `MAE = 0.45 m` (`r = 1.0000`, p95 `2.0 m`). Re-parsing the 153k raw zip archives is unnecessary for atmospheric verification.
+- **Clean wind (`truth_wind_groups`, `31,701` groups; `truth_glide_wind`, `12,944` groups):** combining the Huber velocity hodograph and air-relative integer-turn drift shrinks the speed bias against ERA5 in `free air + middle` from `−0.531 m/s` (legacy endpoint drift) to `−0.387 m/s` (`−0.279 m/s` hodograph-only) and raises speed correlation across every band (`0.402 → 0.429` near ground, `0.603 → 0.612` free air). Cross-checking against `12,217` independent multi-heading glide-wind groups confirms clean thermal wind agrees with glides to **`+0.067 m/s`**, whereas ERA5 overestimates boundary-layer wind by **`+0.391 m/s`**.
+- **Calibrated ASL top-of-lift (`truth_ceiling`, `13,202` chip-hours, `265` airspace-capped flagged):** excluding airspace caps (`12,882` chip-hours), correlation with ERA5 jumps from `0.61` (notebook 09) to **`0.663`** above ERA5 ground, **`0.804`** in metres ASL, and **`0.809`** against `min(BLH, cloud_base)`. Median gap `ERA5 BLH − p90 ceiling` shrinks from `365 m` to `242 m`, and **day-to-day within-site correlation rises from `0.64` to `0.683`** across `124` sites with `5+` days.
+- **Core climb strength & competition task speed (`truth_tasks`, `1,811` completed tasks):** IGC-measured 60 s core climb (`task_core60_p75_ms`) is the single strongest physical correlate of official winner speed (`r = +0.556`, ahead of full-thermal mean `+0.525`, ASL ceiling `+0.408`, and route-projected tailwind `+0.331`).
