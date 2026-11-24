@@ -748,7 +748,13 @@ def build_daily_and_tasks(
         daily = pd.DataFrame(columns=["site_id", "local_date"])
 
     # Task-level truth combining official results with IGC-measured conditions during the task.
-    tasks = pd.read_parquet(db / "tasks.parquet")
+    # Read only metadata/geometry columns so tasks.n_goal / tasks.n_launched never collide with
+    # counts aggregated from results.parquet.
+    import pyarrow.parquet as pq
+
+    want_tcols = ["task_key", "event_key", "date", "task_type", "distance_km", "ss_distance_km", "stopped", "training"]
+    have_tcols = set(pq.ParquetFile(db / "tasks.parquet").schema.names)
+    tasks = pd.read_parquet(db / "tasks.parquet", columns=[c for c in want_tcols if c in have_tcols])
     if task_subset is not None:
         tasks = tasks[tasks["task_key"].isin(task_subset)].copy()
     tasks = tasks[~tasks["training"].fillna(False).astype(bool) & tasks["task_type"].isin(["race", "elapsed"])].copy()
@@ -773,7 +779,7 @@ def build_daily_and_tasks(
     tt["median_goal_kmh"] = dist / (tt["median_goal_s"] / 3600.0)
     tt.loc[(tt["winner_kmh"] < 5.0) | (tt["winner_kmh"] > 80.0), ["winner_h", "winner_kmh"]] = np.nan
 
-    ev_sites = pd.read_parquet(db / "event_sites.parquet", columns=["event_key", "site_id"])
+    ev_sites = pd.read_parquet(db / "event_sites.parquet", columns=["event_key", "site_id"]).drop_duplicates("event_key")
     tt = tt.merge(ev_sites, on="event_key", how="left")
 
     # Aggregate calibrated IGC measurements per task_key directly from truth_thermals + truth_flights.
@@ -1210,7 +1216,9 @@ def main() -> None:
         print("\nFree+middle wind vs ERA5 (same groups):", flush=True)
         for k, m in fm.items():
             if m.get("groups"):
-                print(f"  {k:16s}: RMSE={m['vector_rmse_ms']:.3f} m/s  bias={m['speed_bias_ms']:+.3f} m/s  dir={m['dir_error_deg']} deg  <30deg={m['dir_within_30']:.1%}", flush=True)
+                w30 = f"{m['dir_within_30']:.1%}" if m.get("dir_within_30") is not None else "-"
+                ddeg = f"{m['dir_error_deg']} deg" if m.get("dir_error_deg") is not None else "-"
+                print(f"  {k:16s}: RMSE={m['vector_rmse_ms']:.3f} m/s  bias={m['speed_bias_ms']:+.3f} m/s  dir={ddeg}  <30deg={w30}", flush=True)
     if not audit_1hz.get("skipped"):
         print(f"\n1 Hz vs 5 s audit verdict: {audit_1hz.get('verdict')} ({audit_1hz.get('n_thermals_matched')} thermals)", flush=True)
 
