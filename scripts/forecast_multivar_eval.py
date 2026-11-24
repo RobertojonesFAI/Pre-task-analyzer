@@ -92,54 +92,65 @@ _PRESSURE_THERMO = [
     "temperature_600hPa", "geopotential_height_600hPa",
 ]
 
+# Archive start dates (min_date / blh_min_date) verified live against Open-Meteo Historical Forecast API
+# with a 1-3 day safety margin so pre-archive dates are skipped before batching.
 THERMO_MODELS: list[dict[str, Any]] = [
     {
         "id": "ecmwf_ifs", "name": "ECMWF IFS", "slug": "ecmwf_ifs025", "blh_slug": "ecmwf_ifs",
+        "min_date": "2024-02-01", "blh_min_date": "2024-09-01",
         "region": "global", "bbox": None,
         "vars": [*_CORE_THERMO, "cape", "wind_gusts_10m", "soil_temperature_0_to_7cm", "soil_moisture_0_to_7cm", *_PRESSURE_THERMO],
     },
     {
         "id": "gfs", "name": "GFS", "slug": "gfs_global", "blh_slug": None,
+        "min_date": "2022-01-01",
         "region": "global", "bbox": None,
         "vars": [*_CORE_THERMO, "boundary_layer_height", "cape", "convective_inhibition", "wind_gusts_10m",
                  "soil_temperature_0_to_10cm", "soil_moisture_0_to_10cm", "freezing_level_height", *_PRESSURE_THERMO],
     },
     {
         "id": "icon", "name": "ICON", "slug": "icon_global", "blh_slug": None,
+        "min_date": "2022-11-15",
         "region": "global", "bbox": None,
         "vars": [*_CORE_THERMO, "cape", "wind_gusts_10m", "soil_temperature_0cm", "soil_moisture_0_to_1cm",
                  "freezing_level_height", *_PRESSURE_THERMO],
     },
     {
         "id": "gem", "name": "GEM", "slug": "gem_global", "blh_slug": None,
+        "min_date": "2022-11-20",
         "region": "global", "bbox": None,
         "vars": [*_CORE_THERMO, "cape", "wind_gusts_10m", "soil_temperature_0_to_10cm", "soil_moisture_0_to_10cm",
                  *_PRESSURE_THERMO],
     },
     {
         "id": "ecmwf_aifs", "name": "ECMWF AIFS", "slug": "ecmwf_aifs025_single", "blh_slug": None,
+        "min_date": "2025-02-15",
         "region": "global", "bbox": None,
         "vars": [*_CORE_THERMO, "soil_temperature_0_to_7cm", "soil_moisture_0_to_7cm", *_PRESSURE_THERMO],
     },
     {
         "id": "icon_eu", "name": "ICON-EU", "slug": "icon_eu", "blh_slug": None,
+        "min_date": "2022-11-20",
         "region": "regional", "bbox": (30.0, 70.0, -23.0, 44.5),
         "vars": [*_CORE_THERMO, "cape", "wind_gusts_10m", "soil_temperature_0cm", "soil_moisture_0_to_1cm",
                  "freezing_level_height", *_PRESSURE_THERMO],
     },
     {
         "id": "icon_d2", "name": "ICON-D2", "slug": "icon_d2", "blh_slug": None,
+        "min_date": "2022-11-10",
         "region": "regional", "bbox": (43.5, 57.5, -3.5, 20.0),
         "vars": [*_CORE_THERMO, "cape", "wind_gusts_10m", "soil_temperature_0cm", "soil_moisture_0_to_1cm",
                  "freezing_level_height", *_PRESSURE_THERMO],
     },
     {
         "id": "arome", "name": "AROME", "slug": "meteofrance_arome_france", "blh_slug": None,
+        "min_date": "2023-12-25",
         "region": "regional", "bbox": (38.0, 55.0, -11.5, 15.5),
         "vars": [*_CORE_THERMO, "cape", "wind_gusts_10m", *_PRESSURE_THERMO],
     },
     {
         "id": "hrdps", "name": "HRDPS", "slug": "gem_hrdps_continental", "blh_slug": None,
+        "min_date": "2023-03-01",
         "region": "regional", "bbox": (36.0, 68.0, -148.0, -48.0),
         "vars": [*_CORE_THERMO, "cape", "wind_gusts_10m", "soil_temperature_0_to_10cm", "soil_moisture_0_to_10cm",
                  *_PRESSURE_THERMO],
@@ -423,6 +434,7 @@ def _download_slug_batches(
     label: str,
     pause: float,
     blh_only: bool = False,
+    min_date: str | None = None,
 ) -> pd.DataFrame:
     cols = ["chip_id", "hour", "blh_native_m"] if blh_only else THERMO_CACHE_COLS
     existing = pd.read_parquet(cache_path) if cache_path.exists() else pd.DataFrame(columns=cols)
@@ -433,8 +445,10 @@ def _download_slug_batches(
     chip_centres = {int(c): grid.chip_centre(int(c)) for c in targets["chip_id"].unique()}
     valid_chips = {c for c, (la, lo) in chip_centres.items() if FWW.in_bbox(la, lo, bbox)}
     sub = targets[targets["chip_id"].isin(valid_chips)]
+    if min_date:
+        sub = sub[sub["date"] >= min_date]
     if not len(sub):
-        print(f"  {label:16s}: 0 target chip-hours inside domain", flush=True)
+        print(f"  {label:16s}: 0 target chip-hours inside domain (min_date={min_date or 'none'})", flush=True)
         return existing
 
     needed_hours = {int(cid): set(grp["hour"]) for cid, grp in sub.groupby("chip_id")}
@@ -443,7 +457,8 @@ def _download_slug_batches(
         print(f"  {label:16s}: thermo cache complete ({len(existing):,} chip-hours)", flush=True)
         return existing
 
-    print(f"  {label:16s} ({slug}): fetching {len(batches)} batches ({sub['chip_id'].nunique()} chips, {len(sub):,} chip-hours)...", flush=True)
+    since_tag = f", >={min_date}" if min_date else ""
+    print(f"  {label:16s} ({slug}): fetching {len(batches)} batches ({sub['chip_id'].nunique()} chips, {len(sub):,} chip-hours{since_tag})...", flush=True)
     vars_csv = ",".join(req_vars)
     new_frames: list[pd.DataFrame] = []
     quota_hit = False
@@ -567,13 +582,13 @@ def download_model_thermo(
     df = _download_slug_batches(
         targets, spec["slug"], spec["vars"], spec["bbox"],
         cache_dir / f"{mid}.parquet", cache_dir / f"{mid}_fetched.json",
-        mid, pause=pause, blh_only=False,
+        mid, pause=pause, blh_only=False, min_date=spec.get("min_date"),
     )
     if spec.get("blh_slug"):
         blh_df = _download_slug_batches(
             targets, spec["blh_slug"], ["boundary_layer_height"], spec["bbox"],
             cache_dir / f"{mid}_blh9k.parquet", cache_dir / f"{mid}_blh9k_fetched.json",
-            f"{mid}_blh9k", pause=pause, blh_only=True,
+            f"{mid}_blh9k", pause=pause, blh_only=True, min_date=spec.get("blh_min_date") or spec.get("min_date"),
         )
         df = _merge_blh_sidecar(df, blh_df)
     return df
