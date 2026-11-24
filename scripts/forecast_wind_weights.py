@@ -149,7 +149,13 @@ def _http_get_json(params: dict[str, Any]) -> Any:
                     raw = gzip.decompress(raw)
                 return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
+            raw_err = exc.read()
+            if (exc.headers and exc.headers.get("Content-Encoding", "").lower() == "gzip") or raw_err.startswith(b"\x1f\x8b"):
+                try:
+                    raw_err = gzip.decompress(raw_err)
+                except Exception:
+                    pass
+            body = raw_err.decode("utf-8", errors="replace")
             if exc.code == 429:
                 reason = _extract_error_reason(body)
                 retry_hdr = exc.headers.get("Retry-After") if exc.headers else None
@@ -163,7 +169,10 @@ def _http_get_json(params: dict[str, Any]) -> Any:
                 if "daily" in low or "hourly" in low or (retry_s is not None and retry_s > 90.0):
                     extra = f" (Retry-After={retry_hdr}s)" if retry_hdr else ""
                     raise QuotaExceeded(f"{reason}{extra}") from exc
-                delay = min(65.0, max(3.0, retry_s)) if retry_s is not None else min(60.0, 3.0 * (2 ** attempt))
+                if "minute" in low:
+                    delay = min(65.0, max(30.0, retry_s)) if retry_s is not None else min(65.0, 35.0 + 15.0 * attempt)
+                else:
+                    delay = min(65.0, max(3.0, retry_s)) if retry_s is not None else min(60.0, 3.0 * (2 ** attempt))
                 print(f"    429 ({reason[:120]}), waiting {delay:.1f}s...", flush=True)
                 time.sleep(delay)
                 last_err = exc
