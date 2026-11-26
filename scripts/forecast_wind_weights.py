@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import http.client
+import ipaddress
 import json
 import math
 import socket
@@ -52,11 +53,12 @@ from pta import grid  # noqa: E402
 HIST_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 LEVELS = [925, 850, 700, 600, 500]
 CALM_MS = 3.0
-MERGE_GAP_DAYS = 2         # only bridge <= 2-day gaps inside one competition week (avoid paying for empty days)
-MAX_WINDOW_DAYS = 14       # cap window length at 14 days so Open-Meteo's day-range weighting stays minimal
+MAX_WINDOW_DAYS = 14       # Open-Meteo's time weight is max(1, D/14), so 1..14 inclusive days cost the same
+MERGE_GAP_DAYS = MAX_WINDOW_DAYS - 1  # merge any dates within one 14-day inclusive window at zero extra weight
 BATCH_CHIPS = 8            # chips per multi-coordinate request sharing a window
 CHECKPOINT_EVERY = 20      # flush parquet cache to Drive every N batches
 HTTP_TIMEOUT_S = 35
+LOCAL_HTTP_TIMEOUT_S = 120
 SHRINKAGE_K = 20.0         # Empirical Bayes shrinkage toward parent (region/global) skill
 BOOTSTRAP_ITERS = 1000
 WEIGHT_BANDS = ("free air", "middle")
@@ -137,15 +139,34 @@ def _extract_error_reason(body: str) -> str:
     return body.strip()[:200] or "Too Many Requests"
 
 
-def _http_get_json(params: dict[str, Any]) -> Any:
-    url = f"{HIST_FORECAST_URL}?{urllib.parse.urlencode(params)}"
+def is_local_api_url(url: str) -> bool:
+    """Return True when `url` points at a local or LAN self-hosted Open-Meteo server."""
+    host = (urllib.parse.urlparse(url).hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback or ip.is_private
+    except ValueError:
+        return False
+
+
+def _http_get_json(
+    params: dict[str, Any],
+    base_url: str = HIST_FORECAST_URL,
+    timeout: float = HTTP_TIMEOUT_S,
+) -> Any:
+    url = f"{base_url}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept-Encoding": "gzip", "User-Agent": "pre-task-analyzer-hist/1"})
+    local = is_local_api_url(base_url)
     last_err: Exception | None = None
     for attempt in range(4):
         try:
-            with _OPENER.open(req, timeout=HTTP_TIMEOUT_S) as resp:
+            with _OPENER.open(req, timeout=timeout) as resp:
                 raw = resp.read()
-                if resp.headers.get("Content-Encoding", "").lower() == "gzip":
+                if resp.headers.get("Content-Encoding", "").lower() == "gzip" or raw.startswith(b"\x1f\x8b"):
                     raw = gzip.decompress(raw)
                 return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -180,10 +201,18 @@ def _http_get_json(params: dict[str, Any]) -> Any:
             if exc.code == 400:
                 raise RuntimeError(f"HTTP 400: {body[:180]}") from exc
             last_err = exc
-            time.sleep(min(20.0, 2.0 * (attempt + 1)))
+            time.sleep(min(10.0 if local else 20.0, 1.5 * (attempt + 1)))
+        except urllib.error.URLError as exc:
+            if local and isinstance(exc.reason, ConnectionRefusedError):
+                raise RuntimeError(
+                    f"Cannot connect to local Open-Meteo server at {base_url}. "
+                    f"Start it first with scripts/local_openmeteo.py --start."
+                ) from exc
+            last_err = exc
+            time.sleep(min(10.0 if local else 15.0, 1.5 * (attempt + 1)))
         except Exception as exc:
             last_err = exc
-            time.sleep(min(15.0, 1.5 * (attempt + 1)))
+            time.sleep(min(10.0 if local else 15.0, 1.5 * (attempt + 1)))
     raise RuntimeError(f"Open-Meteo request failed after retries: {last_err}")
 
 
@@ -291,14 +320,15 @@ def load_groups(db: Path, from_year: int, max_sites: int | None = None, min_chip
 # ── Step 2: Resumable Historical Forecast downloader ─────────────────────────
 
 def _merge_date_windows(dates: list[date]) -> list[tuple[date, date]]:
-    """Collapse a sorted list of dates into contiguous [start, end] windows."""
+    """Collapse a sorted list of dates into contiguous [start, end] windows of at most MAX_WINDOW_DAYS inclusive days."""
     if not dates:
         return []
     ds = sorted(set(dates))
+    max_span = MAX_WINDOW_DAYS - 1
     windows: list[tuple[date, date]] = []
     w_start = w_end = ds[0]
     for d in ds[1:]:
-        if (d - w_end).days <= MERGE_GAP_DAYS and (d - w_start).days <= MAX_WINDOW_DAYS:
+        if (d - w_end).days <= MERGE_GAP_DAYS and (d - w_start).days <= max_span:
             w_end = d
         else:
             windows.append((w_start, w_end))
@@ -329,7 +359,7 @@ def _is_date_covered(d: date, intervals: list[tuple[date, date]]) -> bool:
     return any(d0 <= d <= d1 for d0, d1 in intervals)
 
 
-def _plan_batches(g_sub: pd.DataFrame, done_keys: set[str]) -> list[tuple[str, str, list[int]]]:
+def _plan_batches(g_sub: pd.DataFrame, done_keys: set[str], batch_chips: int = BATCH_CHIPS) -> list[tuple[str, str, list[int]]]:
     """Build compact (start_iso, end_iso, [chip_ids]) download batches for uncovered (chip, date) pairs.
 
     Avoids both cross-year chip Cartesian products and re-fetching dates already covered by wider
@@ -359,11 +389,12 @@ def _plan_batches(g_sub: pd.DataFrame, done_keys: set[str]) -> list[tuple[str, s
             chips = [int(c) for c in in_win["chip_id"].unique()]
             by_window.setdefault((s0, s1), set()).update(chips)
 
+    step = max(1, int(batch_chips))
     batches: list[tuple[str, str, list[int]]] = []
     for (s0, s1), chip_set in sorted(by_window.items()):
         c_list = sorted(chip_set)
-        for i in range(0, len(c_list), BATCH_CHIPS):
-            batches.append((s0, s1, c_list[i : i + BATCH_CHIPS]))
+        for i in range(0, len(c_list), step):
+            batches.append((s0, s1, c_list[i : i + step]))
     return batches
 
 
@@ -437,12 +468,21 @@ def _save_cache(cache_path: Path, done_path: Path, existing: pd.DataFrame, new_f
     return combined
 
 
-def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Path, pause: float) -> pd.DataFrame:
+def download_model_history(
+    g: pd.DataFrame,
+    spec: dict[str, Any],
+    cache_dir: Path,
+    pause: float,
+    api_url: str = HIST_FORECAST_URL,
+    timeout: float | None = None,
+    batch_chips: int = BATCH_CHIPS,
+) -> pd.DataFrame:
     """Download and cache historical forecast wind profiles for one model over all eligible groups."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     mid = spec["id"]
     cache_path = cache_dir / f"{mid}.parquet"
     done_path = cache_dir / f"{mid}_fetched.json"
+    req_timeout = float(timeout) if timeout is not None else float(LOCAL_HTTP_TIMEOUT_S if is_local_api_url(api_url) else HTTP_TIMEOUT_S)
 
     existing = pd.read_parquet(cache_path) if cache_path.exists() else pd.DataFrame(columns=CACHE_COLS)
     if len(existing):
@@ -460,7 +500,7 @@ def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Pat
     needed_hours: dict[int, set[pd.Timestamp]] = {
         int(cid): set(grp["hour"]) for cid, grp in g_sub.groupby("chip_id")
     }
-    batches = _plan_batches(g_sub, done_keys)
+    batches = _plan_batches(g_sub, done_keys, batch_chips=batch_chips)
     if not batches:
         print(f"  {mid:12s}: cache complete ({len(existing):,} chip-hours)", flush=True)
         return existing
@@ -486,7 +526,7 @@ def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Pat
                 "models": spec["slug"],
                 "wind_speed_unit": "ms",
                 "timezone": "UTC",
-            })
+            }, base_url=api_url, timeout=req_timeout)
             consecutive_429 = 0
             items = data if isinstance(data, list) else [data]
             if len(items) == len(chips):
@@ -523,7 +563,7 @@ def download_model_history(g: pd.DataFrame, spec: dict[str, Any], cache_dir: Pat
                             "models": spec["slug"],
                             "wind_speed_unit": "ms",
                             "timezone": "UTC",
-                        })
+                        }, base_url=api_url, timeout=req_timeout)
                         consecutive_429 = 0
                         df1 = _parse_batch_response([d1] if isinstance(d1, dict) else d1, [c], spec, needed_hours)
                         if len(df1):
@@ -913,12 +953,17 @@ def main() -> None:
     parser.add_argument("--out", type=Path, help="output folder (default DB/models/forecast_wind_weights)")
     parser.add_argument("--from-year", type=int, default=2022, help="earliest year to query (default 2022)")
     parser.add_argument("--models", type=str, default="all", help="comma-separated model ids or 'all'")
-    parser.add_argument("--pause", type=float, default=0.4, help="seconds between Open-Meteo requests (default 0.4)")
+    parser.add_argument("--api-url", type=str, default=HIST_FORECAST_URL, help=f"forecast API endpoint (default {HIST_FORECAST_URL})")
+    parser.add_argument("--timeout", type=float, default=None, help="HTTP timeout in seconds (default 35 remote, 120 local)")
+    parser.add_argument("--batch-chips", type=int, default=BATCH_CHIPS, help=f"chips per multi-coordinate request (default {BATCH_CHIPS})")
+    parser.add_argument("--pause", type=float, default=None, help="seconds between requests (default 0.4 remote, 0.0 local)")
     parser.add_argument("--max-sites", type=int, default=None, help="limit to top N sites by group count (smoke test)")
     parser.add_argument("--min-chip-groups", type=int, default=1, help="drop chips with fewer than N groups (default 1)")
     parser.add_argument("--download-only", action="store_true", help="only download/update caches for --models; skip scoring")
     parser.add_argument("--skip-download", action="store_true", help="score using already cached parquets only")
     args = parser.parse_args()
+    local_api = is_local_api_url(args.api_url)
+    pause_s = float(args.pause) if args.pause is not None else (0.0 if local_api else 0.4)
 
     out = args.out or (args.db / "models" / "forecast_wind_weights")
     cache_dir = args.db / "weather" / "hist_forecast"
@@ -950,7 +995,10 @@ def main() -> None:
                 wx["hour"] = pd.to_datetime(wx["hour"]).astype("datetime64[ns]")
         else:
             try:
-                wx = download_model_history(g, spec, cache_dir, pause=args.pause)
+                wx = download_model_history(
+                    g, spec, cache_dir, pause=pause_s,
+                    api_url=args.api_url, timeout=args.timeout, batch_chips=args.batch_chips,
+                )
             except QuotaExceeded as exc:
                 print(
                     f"\n[PAUSED] {exc}\n"
