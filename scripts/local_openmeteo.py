@@ -43,7 +43,7 @@ IMAGE_REPO = "open-meteo/open-meteo"
 IMAGE_TAG = "latest"
 REMOTE_DATA_DIR = "https://openmeteo.s3.amazonaws.com/data/"
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8080
+DEFAULT_PORT = 18080  # avoid port 8080, which Google Colab's own runtime proxy occupies
 DEFAULT_WORK_DIR = Path("/tmp/openmeteo-local")
 DEFAULT_PROBE_PARAMS = {
     "latitude": "46.5000",
@@ -470,7 +470,28 @@ def start_server(
 
     if _port_open(host, port):
         pid = _read_pid(pid_file)
-        print(f"Local Open-Meteo server already listening on http://{host}:{port} (pid={pid or 'external'})", flush=True)
+        if pid is None:
+            # Verify that an external listener on this port is actually Open-Meteo (e.g. not Colab's proxy on 8080).
+            try:
+                p = probe_server(host, port)
+            except urllib.error.HTTPError as exc:
+                raise SystemExit(
+                    f"Port {port} on {host} is already in use by another service (HTTP {exc.code}, not openmeteo-api). "
+                    f"Re-run with a free port, e.g. --port {DEFAULT_PORT}."
+                ) from exc
+            except Exception as exc:
+                raise SystemExit(
+                    f"Port {port} on {host} is occupied by a non-Open-Meteo listener ({exc}). "
+                    f"Re-run with a free port, e.g. --port {DEFAULT_PORT}."
+                ) from exc
+            print(f"Existing Open-Meteo server listening on http://{host}:{port} (external)", flush=True)
+            print(
+                f"Historical S3 probe OK in {p['elapsed_s']}s: elev={p['elevation_m']} m, "
+                f"ICON 2024-06-15 12Z t2m={p['t2m_noon_c']} C, t850={p['t850_noon_c']} C, z850={p['z850_noon_m']} m",
+                flush=True,
+            )
+            return {"status": "running", "pid": None, "url": f"http://{host}:{port}/v1/forecast", "probe": p}
+        print(f"Local Open-Meteo server already listening on http://{host}:{port} (pid={pid})", flush=True)
         info = {"status": "running", "pid": pid, "url": f"http://{host}:{port}/v1/forecast"}
         if not skip_probe:
             info["probe"] = probe_server(host, port)
@@ -578,7 +599,7 @@ def start_server(
 
     pid_file.write_text(str(proc.pid), encoding="utf-8")
 
-    deadline = time.monotonic() + 30.0
+    deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
         rc = proc.poll()
         if rc is not None:
@@ -587,7 +608,7 @@ def start_server(
             break
         time.sleep(0.25)
     else:
-        raise RuntimeError(f"openmeteo-api did not open {host}:{port} within 30s.\n--- Server log ---\n{_tail_log(log_file)}")
+        raise RuntimeError(f"openmeteo-api did not open {host}:{port} within 60s.\n--- Server log ---\n{_tail_log(log_file)}")
 
     print(f"Server ready on http://{host}:{port}/v1/forecast (pid={proc.pid}, log={log_file})", flush=True)
     info: dict[str, Any] = {"status": "started", "pid": proc.pid, "url": f"http://{host}:{port}/v1/forecast", "cache_gb": safe_cache_gb}
