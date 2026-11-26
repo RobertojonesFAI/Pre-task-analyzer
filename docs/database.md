@@ -217,7 +217,7 @@ ERA5-Land can also come from Google Earth Engine (`scripts/era5_land_gee.py`, no
 
 **`hist_forecast/<model>.parquet`** (notebook 14, `scripts/forecast_wind_weights.py`): resumable cache of hourly archived forecast wind profiles from Open-Meteo's Historical Forecast API (`chip_id`, `hour`, `u10`, `v10`, `u100`, `v100`, and `u_<hPa>`, `v_<hPa>`, `z_<hPa>` at 925, 850, 700, 600 and 500 hPa), alongside `<model>_fetched.json` tracking completed chip-date windows.
 
-**`hist_forecast_thermo/<model>.parquet`** (notebook 16, `scripts/forecast_multivar_eval.py`): resumable cache of hourly archived thermodynamic forecast fields (`chip_id`, `hour`, `om_elev`, `blh_native_m`, `t2m_c`, `dewpoint_c`, `sunshine_wm2`, `cloud_total`, `cloud_low`, `rain_mmh`, `cape`, `cin`, `gust10`, `skin_temp_c`, `soil_moisture`, `freezing_level_m`, and `t/z/rh` at 925, 850, 700, 600 hPa), plus `ecmwf_ifs_blh9k.parquet` for ECMWF IFS 9 km native BLH.
+**`hist_forecast_thermo/<model>.parquet`** (notebook 16, `scripts/forecast_multivar_eval.py`): resumable cache of hourly archived thermodynamic forecast fields (`chip_id`, `hour`, `om_elev`, `blh_native_m`, `t2m_c`, `dewpoint_c`, `sunshine_wm2`, `cloud_total`, `cloud_low`, `rain_mmh`, `cape`, `cin`, `gust10`, `skin_temp_c`, `soil_moisture`, `freezing_level_m`, and `t/z/rh` at 925, 850, 700, 600 hPa), plus `ecmwf_ifs_blh9k.parquet` for ECMWF IFS 9 km native BLH. Both `forecast_wind_weights.py` and `forecast_multivar_eval.py` also accept `--api-url http://127.0.0.1:8080/v1/forecast` against a local `openmeteo-api` server backed by AWS Open Data (`s3://openmeteo/data/`, started via `scripts/local_openmeteo.py` in Colab or Docker) for quota-free historical downloads.
 
 ## flight_checks, crossings, thermals, landings
 

@@ -31,6 +31,7 @@ import json
 import math
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -55,9 +56,9 @@ from pta import grid  # noqa: E402
 import task_baseline as TB  # noqa: E402
 import task_model as TM  # noqa: E402
 
-MERGE_GAP_DAYS = 2
-MAX_WINDOW_DAYS = 14
-BATCH_CHIPS = 8
+MERGE_GAP_DAYS = FWW.MERGE_GAP_DAYS
+MAX_WINDOW_DAYS = FWW.MAX_WINDOW_DAYS
+BATCH_CHIPS = FWW.BATCH_CHIPS
 CHECKPOINT_EVERY = 20
 SHRINKAGE_K = 20.0
 PARCEL_EXCESS_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5)
@@ -435,12 +436,23 @@ def _download_slug_batches(
     pause: float,
     blh_only: bool = False,
     min_date: str | None = None,
+    api_url: str = FWW.HIST_FORECAST_URL,
+    timeout: float | None = None,
+    batch_chips: int = BATCH_CHIPS,
+    workers: int = 1,
 ) -> pd.DataFrame:
     cols = ["chip_id", "hour", "blh_native_m"] if blh_only else THERMO_CACHE_COLS
     existing = pd.read_parquet(cache_path) if cache_path.exists() else pd.DataFrame(columns=cols)
     if len(existing):
         existing["hour"] = pd.to_datetime(existing["hour"]).astype("datetime64[ns]")
     done_keys: set[str] = set(json.loads(done_path.read_text(encoding="utf-8"))) if done_path.exists() else set()
+
+    local_api = FWW.is_local_api_url(api_url)
+    req_timeout = float(timeout) if timeout is not None else float(FWW.LOCAL_HTTP_TIMEOUT_S if local_api else FWW.HTTP_TIMEOUT_S)
+    eff_workers = max(1, int(workers))
+    if eff_workers > 1 and not local_api:
+        print(f"  {label:16s}: clamping --workers {eff_workers} -> 1 for public Open-Meteo endpoint", flush=True)
+        eff_workers = 1
 
     chip_centres = {int(c): grid.chip_centre(int(c)) for c in targets["chip_id"].unique()}
     valid_chips = {c for c, (la, lo) in chip_centres.items() if FWW.in_bbox(la, lo, bbox)}
@@ -452,19 +464,25 @@ def _download_slug_batches(
         return existing
 
     needed_hours = {int(cid): set(grp["hour"]) for cid, grp in sub.groupby("chip_id")}
-    batches = FWW._plan_batches(sub, done_keys)
+    batches = FWW._plan_batches(sub, done_keys, batch_chips=batch_chips)
     if not batches:
         print(f"  {label:16s}: thermo cache complete ({len(existing):,} chip-hours)", flush=True)
         return existing
 
     since_tag = f", >={min_date}" if min_date else ""
-    print(f"  {label:16s} ({slug}): fetching {len(batches)} batches ({sub['chip_id'].nunique()} chips, {len(sub):,} chip-hours{since_tag})...", flush=True)
+    mode_tag = f", local w={eff_workers}" if local_api else ""
+    print(
+        f"  {label:16s} ({slug}): fetching {len(batches)} batches "
+        f"({sub['chip_id'].nunique()} chips, {len(sub):,} chip-hours{since_tag}{mode_tag})...",
+        flush=True,
+    )
     vars_csv = ",".join(req_vars)
     new_frames: list[pd.DataFrame] = []
     quota_hit = False
     quota_msg = ""
     consecutive_429 = 0
     n_err = 0
+    t_start = time.monotonic()
 
     def _parse(items: list[dict[str, Any]], chips: list[int]) -> pd.DataFrame:
         if not blh_only:
@@ -490,36 +508,33 @@ def _download_slug_batches(
                 }))
         return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=cols)
 
-    for idx, (s0, s1, chips) in enumerate(batches, 1):
+    def _fetch_one_batch(batch_item: tuple[int, str, str, list[int]]) -> dict[str, Any]:
+        idx_b, s0, s1, chips = batch_item
         lats = ",".join(f"{chip_centres[c][0]:.4f}" for c in chips)
         lons = ",".join(f"{chip_centres[c][1]:.4f}" for c in chips)
+        frames_out: list[pd.DataFrame] = []
+        keys_out: list[str] = []
+        errs_out: list[str] = []
+        saw_429 = False
         try:
             data = FWW._http_get_json({
                 "latitude": lats, "longitude": lons,
                 "start_date": s0, "end_date": s1,
                 "hourly": vars_csv, "models": slug,
                 "wind_speed_unit": "ms", "timezone": "UTC",
-            })
-            consecutive_429 = 0
+            }, base_url=api_url, timeout=req_timeout)
             items = data if isinstance(data, list) else [data]
             if len(items) == len(chips):
                 df = _parse(items, chips)
                 if len(df):
-                    new_frames.append(df)
-                for c in chips:
-                    done_keys.add(f"{c}|{s0}|{s1}")
+                    frames_out.append(df)
+                keys_out.extend(f"{c}|{s0}|{s1}" for c in chips)
+            return {"idx": idx_b, "frames": frames_out, "keys": keys_out, "errs": errs_out, "quota": None, "saw_429": False}
         except FWW.QuotaExceeded as exc:
-            print(f"    Open-Meteo quota reached at batch {idx}/{len(batches)}: {exc}", flush=True)
-            quota_hit = True
-            quota_msg = str(exc)
-            break
+            return {"idx": idx_b, "frames": frames_out, "keys": keys_out, "errs": errs_out, "quota": str(exc), "saw_429": True}
         except Exception as exc:
             if "429" in str(exc):
-                consecutive_429 += 1
-                if consecutive_429 >= 2:
-                    quota_hit = True
-                    quota_msg = f"repeated HTTP 429 at batch {idx}/{len(batches)}"
-                    break
+                saw_429 = True
             if "HTTP 400" in str(exc) and len(chips) > 1:
                 for c in chips:
                     try:
@@ -529,40 +544,97 @@ def _download_slug_batches(
                             "start_date": s0, "end_date": s1,
                             "hourly": vars_csv, "models": slug,
                             "wind_speed_unit": "ms", "timezone": "UTC",
-                        })
-                        consecutive_429 = 0
+                        }, base_url=api_url, timeout=req_timeout)
                         df1 = _parse([d1] if isinstance(d1, dict) else d1, [c])
                         if len(df1):
-                            new_frames.append(df1)
-                        done_keys.add(f"{c}|{s0}|{s1}")
+                            frames_out.append(df1)
+                        keys_out.append(f"{c}|{s0}|{s1}")
                     except FWW.QuotaExceeded as qexc:
-                        quota_hit = True
-                        quota_msg = str(qexc)
-                        break
+                        return {"idx": idx_b, "frames": frames_out, "keys": keys_out, "errs": errs_out, "quota": str(qexc), "saw_429": True}
                     except Exception as exc1:
-                        n_err += 1
                         if "HTTP 400" in str(exc1):
-                            done_keys.add(f"{c}|{s0}|{s1}")
-                        if n_err <= 5:
-                            print(f"    chip {c} ({s0}..{s1}) skipped: {exc1}", flush=True)
+                            keys_out.append(f"{c}|{s0}|{s1}")
+                        errs_out.append(f"chip {c} ({s0}..{s1}) skipped: {exc1}")
                     if pause > 0:
                         time.sleep(pause)
-                if quota_hit:
-                    break
-            else:
-                n_err += 1
-                if "HTTP 400" in str(exc):
-                    for c in chips:
-                        done_keys.add(f"{c}|{s0}|{s1}")
-                if n_err <= 5:
-                    print(f"    batch {idx} ({s0}..{s1}) skipped: {exc}", flush=True)
+                return {"idx": idx_b, "frames": frames_out, "keys": keys_out, "errs": errs_out, "quota": None, "saw_429": saw_429}
+            if "HTTP 400" in str(exc):
+                keys_out.extend(f"{c}|{s0}|{s1}" for c in chips)
+            errs_out.append(f"batch {idx_b} ({s0}..{s1}) skipped: {exc}")
+            return {"idx": idx_b, "frames": frames_out, "keys": keys_out, "errs": errs_out, "quota": None, "saw_429": saw_429}
 
-        if idx % CHECKPOINT_EVERY == 0 or idx == len(batches):
+    def _consume_result(res: dict[str, Any], done_count: int) -> bool:
+        nonlocal existing, new_frames, quota_hit, quota_msg, consecutive_429, n_err
+        if res["frames"]:
+            new_frames.extend(res["frames"])
+        for k in res["keys"]:
+            done_keys.add(k)
+        for em in res["errs"]:
+            n_err += 1
+            if n_err <= 5:
+                print(f"    {em}", flush=True)
+        if res["quota"]:
+            print(f"    Open-Meteo quota reached at batch {res['idx']}/{len(batches)}: {res['quota']}", flush=True)
+            quota_hit = True
+            quota_msg = res["quota"]
+            return True
+        if res["saw_429"]:
+            consecutive_429 += 1
+            if consecutive_429 >= 2:
+                quota_hit = True
+                quota_msg = f"repeated HTTP 429 at batch {res['idx']}/{len(batches)}"
+                return True
+        else:
+            consecutive_429 = 0
+
+        if done_count % CHECKPOINT_EVERY == 0 or done_count == len(batches):
             existing = FWW._save_cache(cache_path, done_path, existing, new_frames, done_keys)
             new_frames = []
-            print(f"    {label:16s}: {idx}/{len(batches)} batches saved ({len(existing):,} chip-hours)", flush=True)
-        if pause > 0:
-            time.sleep(pause)
+            elapsed = max(time.monotonic() - t_start, 1e-6)
+            rate_bpm = done_count / elapsed * 60.0
+            eta_min = (len(batches) - done_count) / max(done_count / elapsed, 1e-9) / 60.0
+            print(
+                f"    {label:16s}: {done_count}/{len(batches)} batches saved "
+                f"({len(existing):,} chip-hours | {rate_bpm:.1f} b/min, ~{eta_min:.1f} min left)",
+                flush=True,
+            )
+        return False
+
+    indexed = [(idx, s0, s1, chips) for idx, (s0, s1, chips) in enumerate(batches, 1)]
+    if eff_workers == 1:
+        for done_count, item in enumerate(indexed, 1):
+            res = _fetch_one_batch(item)
+            if _consume_result(res, done_count):
+                break
+            if pause > 0:
+                time.sleep(pause)
+    else:
+        # Bounded chronological rolling window preserves S3 time-chunk cache locality across workers.
+        max_in_flight = eff_workers * 2
+        it = iter(indexed)
+        done_count = 0
+        with ThreadPoolExecutor(max_workers=eff_workers) as pool:
+            pending = set()
+            for _ in range(min(max_in_flight, len(indexed))):
+                pending.add(pool.submit(_fetch_one_batch, next(it)))
+            while pending:
+                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                stop_now = False
+                for fut in finished:
+                    done_count += 1
+                    res = fut.result()
+                    if _consume_result(res, done_count):
+                        stop_now = True
+                        break
+                if stop_now:
+                    for fut in pending:
+                        fut.cancel()
+                    break
+                while len(pending) < max_in_flight:
+                    try:
+                        pending.add(pool.submit(_fetch_one_batch, next(it)))
+                    except StopIteration:
+                        break
 
     if new_frames or quota_hit:
         existing = FWW._save_cache(cache_path, done_path, existing, new_frames, done_keys)
@@ -576,6 +648,10 @@ def download_model_thermo(
     spec: dict[str, Any],
     cache_dir: Path,
     pause: float,
+    api_url: str = FWW.HIST_FORECAST_URL,
+    timeout: float | None = None,
+    batch_chips: int = BATCH_CHIPS,
+    workers: int = 1,
 ) -> pd.DataFrame:
     cache_dir.mkdir(parents=True, exist_ok=True)
     mid = spec["id"]
@@ -583,12 +659,14 @@ def download_model_thermo(
         targets, spec["slug"], spec["vars"], spec["bbox"],
         cache_dir / f"{mid}.parquet", cache_dir / f"{mid}_fetched.json",
         mid, pause=pause, blh_only=False, min_date=spec.get("min_date"),
+        api_url=api_url, timeout=timeout, batch_chips=batch_chips, workers=workers,
     )
     if spec.get("blh_slug"):
         blh_df = _download_slug_batches(
             targets, spec["blh_slug"], ["boundary_layer_height"], spec["bbox"],
             cache_dir / f"{mid}_blh9k.parquet", cache_dir / f"{mid}_blh9k_fetched.json",
             f"{mid}_blh9k", pause=pause, blh_only=True, min_date=spec.get("blh_min_date") or spec.get("min_date"),
+            api_url=api_url, timeout=timeout, batch_chips=batch_chips, workers=workers,
         )
         df = _merge_blh_sidecar(df, blh_df)
     return df
@@ -1503,6 +1581,8 @@ def run_regional_centroid_check(
     n_sample: int,
     pause: float,
     seed: int = 42,
+    api_url: str = FWW.HIST_FORECAST_URL,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Compare regional high-res models (ICON-D2, AROME, ICON-EU, HRDPS) sampled at the actual
     thermal centroid vs fixed 0.25 deg chip centre on identical wind observations."""
@@ -1511,6 +1591,9 @@ def run_regional_centroid_check(
     wg_p = db / "truth" / "truth_wind_groups.parquet"
     if not wg_p.exists():
         return {"skipped": True, "reason": "missing truth_wind_groups.parquet"}
+    req_timeout = float(timeout) if timeout is not None else float(
+        FWW.LOCAL_HTTP_TIMEOUT_S if FWW.is_local_api_url(api_url) else FWW.HTTP_TIMEOUT_S
+    )
 
     g = pd.read_parquet(wg_p)
     g["hour"] = pd.to_datetime(g["hour"]).astype("datetime64[ns]")
@@ -1556,7 +1639,7 @@ def run_regional_centroid_check(
                     "start_date": r.date, "end_date": r.date,
                     "hourly": req_vars, "models": w_spec["slug"],
                     "wind_speed_unit": "ms", "timezone": "UTC",
-                })
+                }, base_url=api_url, timeout=req_timeout)
                 df1 = FWW._parse_batch_response([data] if isinstance(data, dict) else data, [int(r.chip_id)], w_spec, {int(r.chip_id): {r.hour}})
                 if len(df1):
                     row_df = pick.iloc[[idx]]
@@ -1595,13 +1678,19 @@ def main() -> None:
     parser.add_argument("--out", type=Path, help="output folder (default DB/models/forecast_multivar_eval)")
     parser.add_argument("--from-year", type=int, default=2022, help="earliest year to evaluate (default 2022)")
     parser.add_argument("--models", type=str, default="all", help="comma-separated model ids or 'all'")
-    parser.add_argument("--pause", type=float, default=0.4, help="seconds between Open-Meteo requests (default 0.4)")
+    parser.add_argument("--api-url", type=str, default=FWW.HIST_FORECAST_URL, help=f"forecast API endpoint (default {FWW.HIST_FORECAST_URL})")
+    parser.add_argument("--timeout", type=float, default=None, help="HTTP timeout in seconds (default 35 remote, 120 local)")
+    parser.add_argument("--batch-chips", type=int, default=BATCH_CHIPS, help=f"chips per multi-coordinate request (default {BATCH_CHIPS})")
+    parser.add_argument("--workers", type=int, default=1, help="concurrent request workers (local server only; clamped to 1 on public API)")
+    parser.add_argument("--pause", type=float, default=None, help="seconds between requests (default 0.4 remote, 0.0 local)")
     parser.add_argument("--max-sites", type=int, default=None, help="limit to top N sites (smoke test)")
     parser.add_argument("--wind-only", action="store_true", help="only run Pillar 1 offline re-scoring on cached wind parquets (0 API calls)")
     parser.add_argument("--download-only", action="store_true", help="only download/update thermodynamic caches for --models")
     parser.add_argument("--skip-download", action="store_true", help="run all 4 pillars offline using cached wind + thermo parquets")
     parser.add_argument("--regional-centroid-check", type=int, default=0, help="sample N regional wind groups to compare centroid vs chip centre (default 0)")
     args = parser.parse_args()
+    local_api = FWW.is_local_api_url(args.api_url)
+    pause_s = float(args.pause) if args.pause is not None else (0.0 if local_api else 0.4)
 
     out = args.out or (args.db / "models" / "forecast_multivar_eval")
     thermo_dir = args.db / "weather" / "hist_forecast_thermo"
@@ -1639,7 +1728,11 @@ def main() -> None:
             thermo_tables[mid] = load_cached_thermo(thermo_dir, spec)
         else:
             try:
-                thermo_tables[mid] = download_model_thermo(targets, spec, thermo_dir, pause=args.pause)
+                thermo_tables[mid] = download_model_thermo(
+                    targets, spec, thermo_dir, pause=pause_s,
+                    api_url=args.api_url, timeout=args.timeout,
+                    batch_chips=args.batch_chips, workers=args.workers,
+                )
             except FWW.QuotaExceeded as exc:
                 print(f"\n[PAUSED] {exc}\n         Re-run this cell after Open-Meteo's quota resets.\n", flush=True)
                 quota_stopped = True
@@ -1687,7 +1780,10 @@ def main() -> None:
 
     if args.regional_centroid_check > 0:
         print(f"\n=== Optional regional centroid vs chip-centre check (n={args.regional_centroid_check}) ===", flush=True)
-        rc = run_regional_centroid_check(args.db, selected, args.from_year, out, n_sample=args.regional_centroid_check, pause=args.pause)
+        rc = run_regional_centroid_check(
+            args.db, selected, args.from_year, out, n_sample=args.regional_centroid_check,
+            pause=pause_s, api_url=args.api_url, timeout=args.timeout,
+        )
         print(json.dumps(rc, indent=2), flush=True)
 
     print(f"\nSaved multi-variable verification outputs to {out}", flush=True)
