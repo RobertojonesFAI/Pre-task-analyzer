@@ -16,7 +16,7 @@ flowchart LR
     end
 
     subgraph db["Database (Parquet, Google Drive)"]
-        catalog["Catalog: events, tasks,<br/>results, pilots, tracks<br/>(04)"]
+        catalog["Catalog: events, tasks,<br/>results, pilots, tracks"]
         flights["Flights, climbs, glides,<br/>5 s fixes (05)"]
         terrain["Sites, chips and<br/>1 km cells (06)"]
         weather["Weather tables (07)"]

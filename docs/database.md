@@ -1,6 +1,6 @@
 # Competition database
 
-Parquet tables in `database/` inside the project's Google Drive folder, built by `notebooks/04_build_catalog.ipynb` (`scripts/build_catalog.py`) from the downloads of notebooks 01–03, by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model, and by `notebooks/07_weather_era5.ipynb` and `07b`–`07d` (`scripts/era5.py`, `scripts/era5_arco.py`) from ERA5. They can be read with pandas or queried with SQL through DuckDB, with no database server:
+Parquet tables in `database/` inside the project's Google Drive folder, built from the competitions' IGC tracks, task definitions and official results (Flymaster, AirScore, Airtribune and civlcomps.org, read into the catalog tables by code that is not in this repo), by `notebooks/05_build_flights.ipynb` (`scripts/build_flights.py`) from the tracks, by `notebooks/06_sites_terrain.ipynb` (`scripts/build_sites.py`, `scripts/build_terrain.py`) from the flights and the Copernicus GLO-30 elevation model, and by `notebooks/07_weather_era5.ipynb` and `07b`–`07d` (`scripts/era5.py`, `scripts/era5_arco.py`) from ERA5. They can be read with pandas or queried with SQL through DuckDB, with no database server:
 
 ```python
 import duckdb
