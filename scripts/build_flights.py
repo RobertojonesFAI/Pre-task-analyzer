@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Analyse every unique competition track: the flight, its climbs and glides, and its fixes.
 
-Reads the catalog tables in DB (built by build_catalog.py) and the task packages they point to,
+Reads the catalog tables in DB (events, tasks, results, tracks) and the task packages they point to,
 and writes to DB:
 
     flights      one row per unique track: takeoff, landing, duration, climb statistics, or why no
@@ -234,7 +234,7 @@ def gather(parts, table, keys, threads=16):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("db", type=Path, help="database folder written by build_catalog.py")
+    parser.add_argument("db", type=Path, help="database folder with the catalog tables")
     parser.add_argument("--workers", type=int, default=2, help="processes analysing tracks (default 2)")
     parser.add_argument("--redo", action="store_true", help="discard the cache and analyse every track again")
     parser.add_argument("--retry-errors", action="store_true",

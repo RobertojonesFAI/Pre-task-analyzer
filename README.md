@@ -33,7 +33,7 @@ The full log, step by step: [docs/results.md](docs/results.md). Statistics of th
 | Route planner | A* over the predicted thermals, with wind and speed-to-fly |
 | Alternatives | Builds candidate tasks from the competition's waypoints under the committee's rules and keeps the ones in the target |
 
-The general thermal and landout model, its labels, features and evaluation are described in [docs/model_design.md](docs/model_design.md).
+The general thermal and landout model, its labels, features and evaluation are described in [docs/model_design.md](docs/model_design.md). How the parts connect, with diagrams: [docs/architecture.md](docs/architecture.md), and an interactive graph of the code and docs at [pta.xcmeteo.com/graph/](https://pta.xcmeteo.com/graph/).
 
 Data: competition IGC tracks (Flymaster, AirScore, Airtribune and civlcomps.org), task definitions and official results; ERA5 and HRRR weather; Copernicus GLO-30 terrain.
 
@@ -42,8 +42,8 @@ Data: competition IGC tracks (Flymaster, AirScore, Airtribune and civlcomps.org)
 ```
 notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
-pta/         shared code: IGC reader, results parsers, flight analysis, the global grid and terrain
-docs/        design notes (model_design.md: the general model; database.md: the tables; deployment.md: how it will be served; results.md: what each step produced)
+pta/         shared code: IGC reader, flight analysis, the global grid and terrain
+docs/        design notes (architecture.md: how the parts connect; model_design.md: the general model; database.md: the tables; deployment.md: how it will be served; results.md: what each step produced)
 api/         the API that re-plans a task with a new route (FastAPI, on the OptiPlex behind a Cloudflare Tunnel)
 web/         the web page (Astro + MapLibre on Cloudflare Pages)
 results/     statistics and coverage maps of the database, refreshed every 10 to 15 commits (notebook 12)
@@ -54,11 +54,7 @@ data/        small tables only (catalogs); tracks live in Google Drive
 
 | # | File | What it does | Output |
 |---|------|--------------|--------|
-| 1 | `notebooks/01_download_flymaster.ipynb` | Lists every Flymaster task with a public IGC package (`scripts/scan_flymaster.py`), then downloads each paragliding task into the project's Drive folder: IGC package, task definition and results page (`scripts/download_flymaster.py`) | `flymaster_igc/flymaster_catalog.csv` and `flymaster_igc/<group>/` in Drive |
-| 2 | `notebooks/02_download_airscore.ipynb` | Downloads every finished paragliding competition on FAI AirScore (`scripts/airscore.py`): IGC package and results page per task | `airscore_igc/airscore_catalog.csv` and `airscore_igc/<comp_id>/` in Drive |
-| 3 | `notebooks/03_download_airtribune.ipynb` | Downloads every past paragliding event on Airtribune, 2012 to today (`scripts/airtribune.py`), with the administrators' permission: track archive and results page per task | `airtribune_igc/airtribune_catalog.csv` and `airtribune_igc/<event_id>/` in Drive |
-| 3b | `notebooks/03b_download_civlcomps.ipynb` | Downloads the paragliding XC events published on CIVL's event portal civlcomps.org (`scripts/civlcomps.py`), with CIVL's permission: IGC zip, FS results page and participants per task (IGC uploads began in 2024) | `civlcomps_igc/civlcomps_catalog.csv` and `civlcomps_igc/<event_id>/` in Drive |
-| 4 | `notebooks/04_build_catalog.ipynb` | Fetches the Airtribune task results still missing, then reads every task package and results page into the database tables (`scripts/build_catalog.py`, `pta/`) | `database/*.parquet` in Drive, described in [docs/database.md](docs/database.md) |
+| 1–4 | (not in this repo) | Competition IGC tracks, task definitions and official results from Flymaster, FAI AirScore, Airtribune (with the administrators' permission) and CIVL's event portal civlcomps.org (with CIVL's permission), read into the catalog tables: events, tasks, turnpoints, results, pilots and tracks. The code that collects them is not published | `database/*.parquet` in Drive, described in [docs/database.md](docs/database.md) |
 | 5 | `notebooks/05_build_flights.ipynb` | Analyses every unique track (`scripts/build_flights.py`, `pta/flight.py`): cleans GPS and altitude errors, separates the flight from the drive up and the retrieve, and splits it into climbs and glides | `database/flights`, `climbs`, `glides` and `fixes/` (5 s fixes per task) |
 | 6 | `notebooks/06_sites_terrain.ipynb` | Groups the competitions into flying sites (`scripts/build_sites.py`), downloads the Copernicus GLO-30 DEM around them and describes the terrain of every 1 km cell (`scripts/build_terrain.py`, `pta/terrain.py`, `pta/grid.py`) | `database/sites`, `event_sites`, `site_chips`, `cells`; `dem/glo30/` tiles |
 | 7 | `notebooks/07_weather_era5.ipynb` | Hourly ERA5 (single and pressure levels) and ERA5-Land for every site on its competition days, from the Copernicus Climate Data Store (`scripts/era5.py`; needs a free CDS key), and a first check of ERA5's boundary-layer height against real thermal tops | `database/weather/era5_single`, `era5_levels`, `era5_land` |
@@ -80,7 +76,7 @@ The tracks are too big for git. They live in the project's Google Drive folder.
 
 ## Next steps
 
-Done so far: the database (01–08), the weather (07, 07b–07e), the thermal model v0 (09), gliders, ratings and the task baseline (10), the wind check (11), the task model with weather (13), the web demo with its task planner, and the API. Step by step from here:
+Done so far: the database (1–8), the weather (07, 07b–07e), the thermal model v0 (09), gliders, ratings and the task baseline (10), the wind check (11), the task model with weather (13), the web demo with its task planner, and the API. Step by step from here:
 
 1. **Live tasks with forecasts:** live multi-model Open-Meteo forecasts (ECMWF IFS, ECMWF AIFS, GFS, ICON, GEM, plus regional RRFS, HRDPS, ICON-D2, ICON-EU and AROME where covered) with a Median/Mean blend and uncertainty range are wired into the API and task planner. Next: hindcast verification and bias correction (quantile mapping to ERA5) using Open-Meteo Historical Forecasts and pilot-measured winds from IGC tracks to weight models by site; then the likely route over the predicted thermals and alternative tasks that land in the committee's target.
 2. **Task model v2:** the weather hour by hour along the route rather than averaged over the task window; each pilot's result (goal, time) from rating, glider and harness, added up into the goal share; the thermal model's predictions along the legs.

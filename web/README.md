@@ -35,6 +35,8 @@ python scripts/export_hotspots.py --db "G:/My Drive/IGCS/database" --web web/pub
 
 The page reads its data at runtime from `public/data/`, written by `scripts/export_web.py` (last step of notebook 09) and `scripts/task_model.py` (notebook 13), both into `database/web_data/` in Drive. That folder is not in git. It holds places and aggregates only, never pilot names or tracks.
 
+`public/graph/index.html` is a static page, served at `/graph/`: the interactive graph of the project's code and docs linked from [docs/architecture.md](../docs/architecture.md). It loads vis-network from unpkg.
+
 The basemap is OpenFreeMap's Positron style (free, no key). If it cannot load, the data still shows on a plain background.
 
 ## Run it locally
