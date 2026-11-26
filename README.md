@@ -33,7 +33,7 @@ The full log, step by step: [docs/results.md](docs/results.md). Statistics of th
 | Route planner | A* over the predicted thermals, with wind and speed-to-fly |
 | Alternatives | Builds candidate tasks from the competition's waypoints under the committee's rules and keeps the ones in the target |
 
-The general thermal and landout model, its labels, features and evaluation are described in [docs/model_design.md](docs/model_design.md).
+The general thermal and landout model, its labels, features and evaluation are described in [docs/model_design.md](docs/model_design.md). How the parts connect, with diagrams: [docs/architecture.md](docs/architecture.md), and an interactive graph of the code and docs at [pta.xcmeteo.com/graph/](https://pta.xcmeteo.com/graph/).
 
 Data: competition IGC tracks (Flymaster, AirScore, Airtribune and civlcomps.org), task definitions and official results; ERA5 and HRRR weather; Copernicus GLO-30 terrain.
 
@@ -43,7 +43,7 @@ Data: competition IGC tracks (Flymaster, AirScore, Airtribune and civlcomps.org)
 notebooks/   step-by-step notebooks (run in Colab, in order)
 scripts/     command-line steps
 pta/         shared code: IGC reader, results parsers, flight analysis, the global grid and terrain
-docs/        design notes (model_design.md: the general model; database.md: the tables; deployment.md: how it will be served; results.md: what each step produced)
+docs/        design notes (architecture.md: how the parts connect; model_design.md: the general model; database.md: the tables; deployment.md: how it will be served; results.md: what each step produced)
 api/         the API that re-plans a task with a new route (FastAPI, on the OptiPlex behind a Cloudflare Tunnel)
 web/         the web page (Astro + MapLibre on Cloudflare Pages)
 results/     statistics and coverage maps of the database, refreshed every 10 to 15 commits (notebook 12)

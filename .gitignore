@@ -12,3 +12,6 @@ data/raw/
 
 # OS files
 .DS_Store
+
+# Knowledge graph build output (the public copy is web/public/graph/)
+graphify-out/
