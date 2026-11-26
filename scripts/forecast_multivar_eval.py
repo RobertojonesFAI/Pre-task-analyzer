@@ -808,7 +808,8 @@ def evaluate_ceiling(
         tx = thermo_tables.get(mid)
         if tx is None or not len(tx):
             continue
-        m = c.merge(tx.drop_duplicates(["chip_id", "hour"]), on=["chip_id", "hour"], how="inner")
+        # truth_ceiling already carries ERA5 columns (e.g. cloud_total); the forecast model's keep the bare name.
+        m = c.merge(tx.drop_duplicates(["chip_id", "hour"]), on=["chip_id", "hour"], how="inner", suffixes=("_era5", ""))
         if len(m) < 20:
             continue
 
