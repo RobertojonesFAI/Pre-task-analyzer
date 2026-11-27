@@ -150,7 +150,7 @@ The 9 archived Open-Meteo forecast models scored on 2022+ competitions against t
 - **Wind (clean thermal wind, free air + middle):** 7 of the 9 models match the pilots better than ERA5, GFS (vector error 2.11 m/s) and ECMWF IFS (2.15 m/s) best. Speed bias −0.17 to −0.69 m/s; 62% (ICON-D2) to 78% (HRDPS) of directions within 30°.
 - **Ceiling (multi-pilot top of lift in metres ASL):** no model matches ERA5. The best is ECMWF IFS with the lower of its native boundary layer and the condensation level: 575 m RMSE, day-to-day correlation within a site 0.72. Every model puts the ceiling too high (bias of its best variant +120 to +380 m). Tuning the parcel's trigger excess per model lowers the bias but not the RMSE; for ECMWF IFS, ICON-EU, ICON-D2 and AROME the default +1.0 °C does better than the tuned value.
 - **Climb strength (`core60_p75`):** every model is at ERA5 parity (0.99 to 1.02; R² 0.14 to 0.21), HRDPS worse on 355 groups. The forecasts add nothing over ERA5 about how strong the climbs are.
-- **Tasks (`task_v1` trained on ERA5, run on each model's route weather):** no model beats ERA5. ECMWF IFS raw gives 15.89 min against 15.57 min on ERA5 for the same tasks (+2%). Full-weather quantile mapping to ERA5 helps most models by 0.2 to 0.6 min (GEM, GFS, ICON, ICON-EU, ICON-D2, AROME) but not ECMWF IFS (+0.1 min); mapping the thermodynamics alone makes GFS and GEM worse. HRDPS's 9.55 min are 49 easy tasks (ERA5 gives 9.43 min on them), not a better model.
+- **Tasks (`task_v1` trained on ERA5, run on each model's route weather):** no model beats ERA5. ECMWF IFS raw gives 15.89 min against 15.57 min on ERA5 for the same tasks (+2%). Full-weather quantile mapping to ERA5 helps AROME, GEM, ICON, ICON-D2 and ICON-EU by 0.3 to 0.6 min (paired 95% interval below 0 for each), GFS by 0.2 min (not significant), and not ECMWF IFS or ECMWF AIFS. Mapping the thermodynamics alone makes GFS (+0.48 min) and GEM (+0.29 min) significantly worse. HRDPS's 9.55 min are 49 easy tasks (ERA5 gives 9.43 min on them), not a better model.
 
 Blends on the 1,385 tasks with 2+ models (winner's time error, out of fold):
 
@@ -159,9 +159,25 @@ Blends on the 1,385 tasks with 2+ models (winner's time error, out of fold):
 | Equal mean | 16.30 min | 16.33 min | 16.11 min |
 | Median | 16.33 min | 16.40 min | 16.18 min |
 | Clean-wind weighted | 16.26 min | 16.31 min | 16.08 min |
-| Multi-variable weighted | 16.22 min | 16.25 min | 16.09 min |
+| Multi-variable weighted (sample-size shrunk) | 16.23 min | 16.26 min | 16.09 min |
 | ERA5, same tasks | 15.72 min | | |
 
-Reading: replacing the reanalysis with a forecast costs only 2 to 7% of the winner's time error (2% for ECMWF IFS and AROME), so most of the 16 minutes is the task model's own error, not the forecast's; better forecasts have little left to gain there. The best blend (full QM, multi-variable weights) is 0.2 min better than the raw equal mean, inside the per-strategy 95% intervals, and relative to ERA5 it is no better than ECMWF IFS alone (1.024 against 1.021). The composite weights were nearly flat (8 to 19%) and gave HRDPS 9% on 49 tasks.
+Paired bootstrap (A − B on identical tasks, 476 competitions resampled; negative = A better):
 
-This run predates the paired bootstrap and the sample-size-shrunk composite weights now in `scripts/forecast_multivar_eval.py`; `forecast_weights.json` was not changed. The next run of section 5 tells whether the full QM and blend gains are significant on identical tasks.
+| Comparison | Winner's time | 95% interval | Goal share |
+|---|---|---|---|
+| Full QM vs raw, each of the 4 blends | −0.14 to −0.18 min | all below 0 | −0.05 to −0.06 pts (not significant) |
+| Thermo QM vs raw, each of the 4 blends | +0.03 to +0.07 min | all include 0 | +0.03 to +0.04 pts |
+| Multi-variable full QM vs raw equal mean | −0.21 min | −0.33 to −0.09 | −0.10 pts (not significant) |
+| Multi-variable full QM vs ERA5 | +0.37 min | +0.06 to +0.70 | +0.71 pts (significant) |
+| ECMWF IFS raw alone vs multi-variable full QM (1,279 tasks) | −0.02 min | −0.27 to +0.22 | −0.15 pts (not significant) |
+| Every other model alone, best mode, vs the blend | +0.27 to +0.78 min | above 0 except AROME and HRDPS full QM | |
+
+Reading:
+- Replacing the reanalysis with a forecast costs only 2 to 7% of the winner's time error (2% for ECMWF IFS and AROME). Most of the 16 minutes is the task model's own error, not the forecast's, so better forecasts have little left to gain there. The best blend is still 0.37 min (and 0.7 goal points) worse than ERA5, significantly.
+- Full-weather quantile mapping is a real, small gain for every blend (about 0.15 min); thermodynamics-only mapping is not. `recommended_apply` is true for full QM.
+- How the blend is weighted does not matter: under full QM, equal mean, clean-wind and multi-variable weights are within 0.03 min of each other. The gain over the raw equal mean is the quantile mapping.
+- ECMWF IFS alone, raw, is as good as the 9-model blend with full QM on the tasks it covers. Every other single model is significantly worse than the blend, except AROME and HRDPS with full QM (fewer tasks, intervals include 0).
+- Shrinking the pillars by sample size barely moves the composite weights (still 8.5 to 18%), and HRDPS goes from 9.1% to 10.2%: its small samples pulled its poor wind and climb scores toward the median as much as its good task score. HRDPS's weight was never luck on a few tasks; the weights are nearly flat for every model, because the composite skill varies only from about 1.0 to 1.1.
+
+The live API blends raw forecasts (median or mean) and does not apply quantile mapping yet; `forecast_weights.json` was not changed.
