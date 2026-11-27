@@ -13,8 +13,9 @@ Products (--product):
     single   the 21 single-level variables era5.py asks the CDS for (era5.DATASETS["single"])
     levels   wind, temperature, humidity and height at 925, 850, 700, 600 and 500 hPa, as in
              era5_levels, plus specific humidity (q_<hPa>, g/kg); relative humidity is computed
-             from it, since ARCO does not store it. Each read brings all 37 levels of the world (about 150 MB), so by default
-             notebooks read every 3rd hour (--every 3); the hours between can be interpolated.
+             from it, since ARCO does not store it. Each read brings all 37 levels of the world (about 150 MB);
+             use `--every 1` for hourly profiles (skipping any 3-hourly timestamps already saved)
+             and `--chunk-hours 50` to checkpoint inside each month.
     extra    more single-level variables for the ground and the air mass: skin temperature, top
              soil moisture, albedo, snow depth, water vapour, freezing level, convective rain,
              friction velocity (ERA5-Land has the first four at 0.1°; these are at 0.25°)
@@ -25,10 +26,10 @@ Products (--product):
 Each month is written to WEATHER/arco/<product>/<year>-<month>.parquet in the tidy form of the
 era5_* tables (chip_id, time, converted columns); era5.py merges them into era5_single,
 era5_levels and era5_extra when it converts. A second run reads only the hours a month file is
-missing (new sites or days are added, nothing is read twice). Hours after the last date in ARCO
-are left for the CDS (era5.py).
+missing (new sites, new days, or filling in 1 h timestamps around an earlier `--every 3` run;
+nothing is read twice). Hours after the last date in ARCO are left for the CDS (era5.py).
 
-    python3 scripts/era5_arco.py /content/drive/MyDrive/IGCS/database --product levels --every 3
+    python3 scripts/era5_arco.py /content/drive/MyDrive/IGCS/database --product levels --every 1 --threads 20 --chunk-hours 50 --solar 7-20 --no-prev-day
 """
 
 import argparse
@@ -107,23 +108,39 @@ def convert_values(x, conv):
 
 # ── What to read ─────────────────────────────────────────────────────────────
 
-def needs(db, solar_from=SOLAR_FROM, solar_to=SOLAR_TO, every=1):
+def _site_days(db, include_prev_day=True):
+    """{site_id: set of dates} for each site's competition days (optionally plus the day before)."""
+    if include_prev_day:
+        return site_days(db)
+    tasks = pd.read_parquet(db / "tasks.parquet", columns=["task_key", "event_key", "date"])
+    links = pd.read_parquet(db / "event_sites.parquet")
+    t = tasks.merge(links, on="event_key").dropna(subset=["date"])
+    t["date"] = pd.to_datetime(t["date"], errors="coerce")
+    t = t.dropna(subset=["date"])
+    return {site: set(g["date"].dt.normalize()) for site, g in t.groupby("site_id")}
+
+
+def needs(db, solar_from=SOLAR_FROM, solar_to=SOLAR_TO, every=1, include_prev_day=True, from_year=None, to_year=None):
     """{UTC hour: array of chip_ids} for every site's days, local solar hours solar_from..solar_to,
     UTC hours that are multiples of `every`."""
     chips = pd.read_parquet(db / "site_chips.parquet", columns=["site_id", "chip_id", "era5_lon"])
     site_chips = {s: g["chip_id"].to_numpy() for s, g in chips.groupby("site_id")}
     site_lon = chips.groupby("site_id")["era5_lon"].mean()
     hours = {}
-    for site, days in site_days(db).items():
+    for site, days in _site_days(db, include_prev_day=include_prev_day).items():
         if site not in site_chips:
             continue
         shift = site_lon[site] / 15.0  # solar time = UTC + longitude / 15
         for d in days:
+            if from_year is not None and d.year < from_year:
+                continue
+            if to_year is not None and d.year > to_year:
+                continue
             start = (d + pd.Timedelta(hours=solar_from - shift)).floor("h")
             end = (d + pd.Timedelta(hours=solar_to - shift)).ceil("h")
             for t in pd.date_range(start, end, freq="h"):
                 if t.hour % every == 0:
-                    hours.setdefault(t, []).append(site_chips[site])
+                    hours.setdefault(pd.Timestamp(t), []).append(site_chips[site])
     return {t: np.unique(np.concatenate(v)) for t, v in sorted(hours.items())}
 
 
@@ -198,9 +215,38 @@ def missing(path, wanted):
     """The hours of `wanted` the month file lacks (or lacks some chips of)."""
     if not path.exists():
         return dict(wanted)
-    have = pd.read_parquet(path, columns=["chip_id", "time"])
-    have = have.groupby("time")["chip_id"].apply(set).to_dict()
-    return {t: c for t, c in wanted.items() if not set(c.tolist()) <= have.get(t, set())}
+    have_df = pd.read_parquet(path, columns=["chip_id", "time"])
+    have_df["time"] = pd.to_datetime(have_df["time"]).astype("datetime64[ns]")
+    have = {pd.Timestamp(k): set(v.tolist()) for k, v in have_df.groupby("time")["chip_id"]}
+    return {t: c for t, c in wanted.items() if not set(c.tolist()) <= have.get(pd.Timestamp(t), set())}
+
+
+def _merge_save_month(path, new_df):
+    """Atomically merge `new_df` into an existing month parquet, deduplicating on (chip_id, time)."""
+    if new_df is None or not len(new_df):
+        return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+    new_df = new_df.copy()
+    new_df["time"] = pd.to_datetime(new_df["time"]).astype("datetime64[ns]")
+    if path.exists():
+        old = pd.read_parquet(path)
+        old["time"] = pd.to_datetime(old["time"]).astype("datetime64[ns]")
+        df = pd.concat([old, new_df], ignore_index=True)
+        df = df.drop_duplicates(["chip_id", "time"], keep="last")
+    else:
+        df = new_df
+    df = df.sort_values(["chip_id", "time"]).reset_index(drop=True)
+    tmp = path.with_suffix(".part")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)
+    return df
+
+
+def _hour_chunks(hours_dict, chunk_hours):
+    """Split `{time: chip_ids}` into ordered sub-dicts of at most `chunk_hours` entries."""
+    items = sorted(hours_dict.items())
+    if not chunk_hours or chunk_hours <= 0 or len(items) <= chunk_hours:
+        return [dict(items)]
+    return [dict(items[i:i + chunk_hours]) for i in range(0, len(items), chunk_hours)]
 
 
 def present(ds, variables, required):
@@ -237,6 +283,12 @@ def main():
     parser.add_argument("--every", type=int, default=1, help="read UTC hours that are multiples of this (default 1)")
     parser.add_argument("--solar", default=f"{SOLAR_FROM}-{SOLAR_TO}",
                         help=f"local solar hours to keep (default {SOLAR_FROM}-{SOLAR_TO})")
+    parser.add_argument("--no-prev-day", action="store_true",
+                        help="read competition days only (skip the day before each competition)")
+    parser.add_argument("--from-year", type=int, default=None, help="earliest competition year to include")
+    parser.add_argument("--to-year", type=int, default=None, help="latest competition year to include")
+    parser.add_argument("--chunk-hours", type=int, default=None,
+                        help="checkpoint within each month every N hours (default 50 for levels, 0 = whole month)")
     parser.add_argument("--plan-only", action="store_true", help="print how much there is to read and stop")
     args = parser.parse_args()
     weather = args.weather or args.db / "weather"
@@ -251,8 +303,10 @@ def main():
     variables = present(ds, PRODUCTS[args.product], required=args.product != "extra")
     levels = LEVELS if args.product == "levels" else None
     lo, hi = (int(x) for x in args.solar.split("-"))
+    chunk_hours = args.chunk_hours if args.chunk_hours is not None else (50 if levels else 0)
 
-    wanted = needs(args.db, lo, hi, args.every)
+    wanted = needs(args.db, lo, hi, args.every, include_prev_day=not args.no_prev_day,
+                   from_year=args.from_year, to_year=args.to_year)
     stop = last_hour(ds)
     late = {t for t in wanted if stop is not None and t > stop}
     by_month = {}
@@ -262,8 +316,11 @@ def main():
     todo = {m: missing(out / f"{m[0]}-{m[1]:02d}.parquet", h) for m, h in by_month.items()}
     todo = {m: h for m, h in todo.items() if h}
     n_hours = sum(len(h) for h in todo.values())
+    span_note = f", years {args.from_year or '..'}-{args.to_year or '..'}" if (args.from_year or args.to_year) else ""
+    day_note = ", comp days only" if args.no_prev_day else ""
     print(f"ARCO-ERA5 {args.product}: {len(wanted):,} UTC hours needed ({len({t.normalize() for t in wanted}):,} days, "
-          f"{len(by_month):,} months, every {args.every} h); {n_hours:,} hours in {len(todo):,} months to read "
+          f"{len(by_month):,} months, every {args.every} h, solar {lo}-{hi}{day_note}{span_note}); "
+          f"{n_hours:,} hours in {len(todo):,} months to read "
           f"= {n_hours * len(variables):,} global fields{' of 37 levels' if levels else ''}", flush=True)
     if late:
         print(f"  {len(late):,} hours are after ARCO's last date ({stop:%Y-%m-%d}); era5.py gets those from the CDS",
@@ -273,22 +330,20 @@ def main():
 
     started, done = time.time(), 0
     for (year, month), hours in sorted(todo.items()):
-        t = time.time()
-        df = read_hours(ds, hours, variables, args.threads, levels)
         path = out / f"{year}-{month:02d}.parquet"
-        if path.exists():
-            df = pd.concat([pd.read_parquet(path), df], ignore_index=True)
-            df = df.drop_duplicates(["chip_id", "time"], keep="last")
-        df = df.sort_values(["chip_id", "time"]).reset_index(drop=True)
-        tmp = path.with_suffix(".part")
-        df.to_parquet(tmp, index=False)
-        tmp.replace(path)
-        done += len(hours)
-        took = time.time() - t
-        rate = done / (time.time() - started)
-        print(f"... {year}-{month:02d}: {len(hours)} hours, {df['chip_id'].nunique()} chips, "
-              f"{took:.0f} s ({len(hours) * len(variables) / max(took, 1e-9):.1f} fields/s) | "
-              f"{done:,}/{n_hours:,} hours, about {(n_hours - done) / rate / 3600:.1f} h left", flush=True)
+        chunks = _hour_chunks(hours, chunk_hours)
+        for ci, chunk in enumerate(chunks, 1):
+            t = time.time()
+            new_df = read_hours(ds, chunk, variables, args.threads, levels)
+            df = _merge_save_month(path, new_df)
+            done += len(chunk)
+            took = time.time() - t
+            rate = done / max(time.time() - started, 1e-9)
+            tag = f" [{ci}/{len(chunks)}]" if len(chunks) > 1 else ""
+            n_chips = df["chip_id"].nunique() if len(df) else 0
+            print(f"... {year}-{month:02d}{tag}: {len(chunk)} hours, {n_chips} chips, "
+                  f"{took:.0f} s ({len(chunk) * len(variables) / max(took, 1e-9):.1f} fields/s) | "
+                  f"{done:,}/{n_hours:,} hours, about {(n_hours - done) / rate / 3600:.1f} h left", flush=True)
     print(f"Done in {(time.time() - started) / 3600:.1f} h. Run era5.py --convert-only to merge them into the "
           f"era5_* tables.", flush=True)
 

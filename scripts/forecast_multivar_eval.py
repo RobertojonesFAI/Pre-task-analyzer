@@ -55,9 +55,10 @@ if str(ROOT / "scripts") not in sys.path:
 
 from api import forecast as FC  # noqa: E402
 import forecast_wind_weights as FWW  # noqa: E402
-from pta import grid  # noqa: E402
+from pta import grid, route_weather as RW  # noqa: E402
 import task_baseline as TB  # noqa: E402
 import task_model as TM  # noqa: E402
+import task_model_v2 as TM2  # noqa: E402
 
 MERGE_GAP_DAYS = FWW.MERGE_GAP_DAYS
 MAX_WINDOW_DAYS = FWW.MAX_WINDOW_DAYS
@@ -1163,14 +1164,29 @@ def _assemble_task_tables(
     base_tables: dict[str, pd.DataFrame | None],
     excess_c: float,
 ) -> dict[str, pd.DataFrame | None] | None:
-    """Combine cached historical wind + thermo into the 5-table dict expected by task_model.features_from."""
+    """Combine cached historical wind + thermo into the table dict expected by task_model and pta.route_weather.
+
+    Preserves full hourly upper-air profiles (925, 850, 700, 600, 500 hPa) so Task v2 gets exact
+    1 h vertical flight-altitude winds while remaining 100% compatible with task_v1 (`time3`).
+    """
     if not len(thermo_df):
         return None
     d = thermo_df.drop_duplicates(["chip_id", "hour"]).copy()
+    wind_lv_cols = [f"{v}_{p}" for p in (925, 850, 700, 600, 500) for v in ("u", "v", "z")]
     if len(wind_df):
-        w_cols = [c for c in ["chip_id", "hour", "u10", "v10", "u100", "v100", "u_850", "v_850", "u_700", "v_700"] if c in wind_df]
-        d = d.merge(wind_df[w_cols].drop_duplicates(["chip_id", "hour"]), on=["chip_id", "hour"], how="left")
-    for c in ("u10", "v10", "u100", "v100", "u_850", "v_850", "u_700", "v_700"):
+        w_want = ["chip_id", "hour", "u10", "v10", "u100", "v100", *wind_lv_cols]
+        w_cols = [c for c in w_want if c in wind_df]
+        w_sub = wind_df[w_cols].drop_duplicates(["chip_id", "hour"])
+        d = d.merge(w_sub, on=["chip_id", "hour"], how="left", suffixes=("", "_w"))
+        for p in (925, 850, 700, 600, 500):
+            zw = f"z_{p}_w"
+            if zw in d:
+                if f"z_{p}" in d:
+                    d[f"z_{p}"] = d[f"z_{p}"].fillna(d[zw])
+                else:
+                    d[f"z_{p}"] = d[zw]
+                d = d.drop(columns=[zw])
+    for c in ("u10", "v10", "u100", "v100", *wind_lv_cols):
         if c not in d:
             d[c] = np.nan
 
@@ -1225,20 +1241,18 @@ def _assemble_task_tables(
         "v10": d["v10"].to_numpy(float),
         "gust10": d["gust10"].to_numpy(float),
     })
-    levels = pd.DataFrame({
+    levels_dict: dict[str, Any] = {
         "chip_id": d["chip_id"].to_numpy(np.int64),
         "time3": d["hour"],
-        "t_850": d["t_850"].to_numpy(float),
-        "t_700": d["t_700"].to_numpy(float),
-        "z_850": d["z_850"].to_numpy(float),
-        "z_700": d["z_700"].to_numpy(float),
-        "u_850": d["u_850"].to_numpy(float),
-        "v_850": d["v_850"].to_numpy(float),
-        "u_700": d["u_700"].to_numpy(float),
-        "v_700": d["v_700"].to_numpy(float),
         "rh_700": d["rh_700"].to_numpy(float),
         "rh_850": d["rh_850"].to_numpy(float),
-    })
+    }
+    for p in (925, 850, 700, 600, 500):
+        for v in ("u", "v", "z", "t"):
+            col = f"{v}_{p}"
+            if col in d:
+                levels_dict[col] = d[col].to_numpy(float)
+    levels = pd.DataFrame(levels_dict)
     extra = pd.DataFrame({
         "chip_id": d["chip_id"].to_numpy(np.int64),
         "time": d["hour"],
@@ -1252,6 +1266,8 @@ def _assemble_task_tables(
         "extra": extra,
         "static": base_tables.get("static"),
         "elev": base_tables.get("elev"),
+        "cells": base_tables.get("cells"),
+        "land": None,
     }
 
 
@@ -1774,6 +1790,365 @@ def evaluate_tasks_and_calibration(
     return e2e_df, blend_cv, cal_payload, multivar_weights_payload
 
 
+# ── Pillar 4b: Hourly Task Model v2 & Chip-Hour Quantile Mapping ─────────────
+
+def backfill_route_wind_caches(
+    db: Path,
+    selected: list[dict[str, Any]],
+    from_year: int,
+    pause: float,
+    api_url: str = FWW.HIST_FORECAST_URL,
+    timeout: float | None = None,
+    batch_chips: int = BATCH_CHIPS,
+    max_sites: int | None = None,
+) -> None:
+    """Fill any 2022+ task route chip-hours missing from DB/weather/hist_forecast/<model>.parquet."""
+    targets = build_thermo_targets(db, from_year=from_year, max_sites=max_sites)
+    if not len(targets):
+        print("Route wind backfill: 0 targets found.", flush=True)
+        return
+    wind_dir = db / "weather" / "hist_forecast"
+    wind_dir.mkdir(parents=True, exist_ok=True)
+    for spec in selected:
+        mid = spec["id"]
+        w_spec = FWW.MODEL_BY_ID.get(mid)
+        if w_spec is None:
+            continue
+        sub = targets
+        if spec.get("min_date"):
+            sub = targets[targets["date"] >= spec["min_date"]]
+        if not len(sub):
+            continue
+        try:
+            FWW.download_model_history(
+                sub, w_spec, wind_dir, pause=pause,
+                api_url=api_url, timeout=timeout, batch_chips=batch_chips,
+            )
+        except FWW.QuotaExceeded as exc:
+            print(f"\n[PAUSED route wind backfill] {exc}", flush=True)
+            break
+
+
+def evaluate_tasks_v2_and_hourly_qm(
+    db: Path,
+    selected: list[dict[str, Any]],
+    thermo_tables: dict[str, pd.DataFrame],
+    trigger_cv: dict[str, Any],
+    wind_cv: dict[str, Any],
+    multivar_weights: dict[str, Any],
+    from_year: int,
+    out_dir: Path,
+    thermal_rows: int = 400_000,
+    seed: int = 7,
+) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any]]:
+    """Leakage-free 5-fold competition-grouped CV of hourly Task Model v2 on 2022+ forecasts.
+
+    Compares three forecast calibration modes per model and blend:
+      - raw         unmodified hourly Open-Meteo tables -> hourly route features -> Task v2 + pilot model
+      - hourly_qm   in-fold chip-hour Quantile Maps (preserving wind direction) applied before hourly features
+      - feature_qm  in-fold Quantile Maps fitted on task-level hourly features
+
+    Writes outputs to `out_dir / "task_v2"`: `task_v2_e2e_scores.csv`, `task_v2_paired_bootstrap.csv`,
+    `task_v2_blend_cv.json`, and `hourly_forecast_calibration.json`.
+    """
+    v2_out = out_dir / "task_v2"
+    v2_out.mkdir(parents=True, exist_ok=True)
+
+    t_all = TM2.build_base_task_table(db)
+    if not len(t_all):
+        return pd.DataFrame(), {"error": "empty tasks table"}, {}
+
+    seg_all = RW.routes_segments(db, t_all)
+    chips_route = set(seg_all["chip_id"].unique())
+    cells_route = set(seg_all["cell_id"].unique())
+    era_tables = RW.load_era5_hourly_tables(
+        db, chips=None, cells_needed=cells_route, include_land=False,
+    )
+
+    era_wx, era_diag = RW.extract_hourly_route_features(
+        t_all, seg_all, era_tables, include_terrain=True, include_land=False, return_panels=True,
+    )
+    t_all = t_all.merge(era_wx, left_on="task_key", right_index=True, how="left")
+
+    t_eval = t_all[t_all["date"].dt.year >= from_year].reset_index(drop=True)
+    t_pre = t_all[t_all["date"].dt.year < from_year].reset_index(drop=True)
+    n_ev = int(t_eval["event_key"].nunique())
+    if n_ev < 3:
+        return pd.DataFrame(), {"error": f"insufficient 2022+ events ({n_ev})"}, {}
+
+    eval_keys = set(t_eval["task_key"])
+    seg_eval = seg_all[seg_all["task_key"].isin(eval_keys)].copy()
+    sub_data = TM2.load_thermal_sub_datasets(db, era_tables, thermal_rows=thermal_rows, seed=seed)
+    pilot_all = TM2.build_pilot_table(db, t_all)
+
+    # Assemble raw hourly tables per forecast model once, recording wind coverage.
+    wind_cache_dir = db / "weather" / "hist_forecast"
+    fc_raw_tables: dict[str, dict[str, pd.DataFrame | None]] = {}
+    fc_raw_wx: dict[str, pd.DataFrame] = {}
+    fc_raw_diag: dict[str, dict[str, Any]] = {}
+    wind_cov: dict[str, float] = {}
+
+    for spec in selected:
+        mid = spec["id"]
+        tx = thermo_tables.get(mid)
+        if tx is None or not len(tx):
+            continue
+        wp = wind_cache_dir / f"{mid}.parquet"
+        wdf = pd.read_parquet(wp) if wp.exists() else pd.DataFrame()
+        if len(wdf):
+            wdf["hour"] = pd.to_datetime(wdf["hour"]).astype("datetime64[ns]")
+        exc = float((trigger_cv.get(mid) or {}).get("recommended_excess_c", 1.0))
+        tbls = _assemble_task_tables(wdf, tx, era_tables, excess_c=exc)
+        if tbls is None:
+            continue
+        wx_m, diag_m = RW.extract_hourly_route_features(
+            t_eval, seg_eval, tbls, include_terrain=True, include_land=False, return_panels=True,
+        )
+        has_data = wx_m["t2m_c"].notna() if "t2m_c" in wx_m else wx_m["t2m_mean"].notna()
+        has_data = has_data | wx_m["blh_mean"].notna()
+        wx_m = wx_m[has_data]
+        if len(wx_m) >= 15:
+            fc_raw_tables[mid] = tbls
+            fc_raw_wx[mid] = wx_m
+            fc_raw_diag[mid] = diag_m
+            wind_cov[mid] = round(float(wx_m["wind_flt_mean"].notna().mean()), 4)
+
+    active_mids = sorted(fc_raw_tables.keys())
+    if not active_mids:
+        return pd.DataFrame(), {"error": "no forecast models with sufficient 2022+ task overlap"}, {}
+
+    # Precompute chip-hours per task for leakage-free in-fold hourly QM fitting.
+    lead_eval = era_diag["lead_panel"]
+    lead_eval = lead_eval[lead_eval["task_key"].isin(eval_keys)]
+    task_chip_times = lead_eval[["task_key", "chip_id", "time"]].drop_duplicates()
+
+    base_strict = [f for f in TM2.STRICT_BASE_FEATURES if f in t_all and t_all[f].notna().any()]
+    core_cols = [f for f in RW.HOURLY_CORE_FEATURES + RW.TERRAIN_ROUTE_FEATURES if f in t_all and t_all[f].notna().any()]
+    qm_feature_cols = [f for f in RW.HOURLY_CORE_FEATURES if f in t_all and t_all[f].notna().any()]
+
+    gkf = GroupKFold(n_splits=min(5, n_ev))
+    era_oof_k = np.full(len(t_eval), np.nan)
+    era_oof_g = np.full(len(t_eval), np.nan)
+
+    modes = ("raw", "hourly_qm", "feature_qm")
+    oof_preds: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {
+        (mid, mode): (np.full(len(t_eval), np.nan), np.full(len(t_eval), np.nan))
+        for mid in active_mids
+        for mode in modes
+    }
+
+    for fold_i, (tr_i, te_i) in enumerate(gkf.split(t_eval, groups=t_eval["event_key"])):
+        tr_df = pd.concat([t_pre, t_eval.iloc[tr_i]], ignore_index=True)
+        te_df = t_eval.iloc[te_i].copy()
+        tr_events = set(tr_df["event_key"].unique())
+        tr_eval_keys = set(t_eval.iloc[tr_i]["task_key"])
+        te_keys = list(te_df["task_key"])
+        te_key_set = set(te_keys)
+
+        # 1. Fit in-fold thermal sub-models on training events only (ERA5).
+        sub_bundle = TM2.ThermalSubBundle(seed=seed + fold_i).fit(sub_data, group_col="event_key", train_groups=tr_events)
+        tr_keys = set(tr_df["task_key"])
+        tr_sub = sub_bundle.predict_task_features(
+            era_diag["lead_panel"][era_diag["lead_panel"]["task_key"].isin(tr_keys)],
+            era_diag["pack_panel"][era_diag["pack_panel"]["task_key"].isin(tr_keys)],
+            pd.Index(tr_df["task_key"]),
+            era_diag["task_window_h"],
+        )
+        te_era_sub = sub_bundle.predict_task_features(
+            era_diag["lead_panel"][era_diag["lead_panel"]["task_key"].isin(te_key_set)],
+            era_diag["pack_panel"][era_diag["pack_panel"]["task_key"].isin(te_key_set)],
+            pd.Index(te_df["task_key"]),
+            era_diag["task_window_h"],
+        )
+        tr_m4 = tr_df.merge(tr_sub, left_on="task_key", right_index=True, how="left")
+        te_era_m4 = te_df.merge(te_era_sub, left_on="task_key", right_index=True, how="left")
+
+        sub_cols_ok = [c for c in TM2.THERMAL_SUB_FEATURES if tr_m4[c].notna().any()]
+        feats_v2 = base_strict + core_cols + sub_cols_ok
+
+        # 2. Fit task-level regressors + pilot-level model on training fold (ERA5).
+        tr_k = tr_m4.dropna(subset=["winner_kmh"])
+        mk = TM2.make_task_regressor(seed=seed + fold_i).fit(tr_k[feats_v2], tr_k["winner_kmh"])
+        tr_g = tr_m4.dropna(subset=["goal_share"])
+        mg = TM2.make_task_regressor(seed=seed + fold_i).fit(tr_g[feats_v2], tr_g["goal_share"])
+
+        p_tr = pilot_all[pilot_all["task_key"].isin(tr_keys)]
+        p_te = pilot_all[pilot_all["task_key"].isin(te_key_set)]
+        pb = TM2.PilotModelBundle(seed=seed + fold_i).fit(p_tr, tr_m4, feats_v2, group_col="event_key") if len(p_tr) >= 50 else None
+
+        def _predict_v2(df_in: pd.DataFrame, p_sub: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+            X = pd.DataFrame({c: (df_in[c].to_numpy(float) if c in df_in else np.nan) for c in feats_v2}, index=df_in.index)
+            pk = np.maximum(5.0, mk.predict(X))
+            pg = np.clip(mg.predict(X), 0.0, 1.0)
+            if pb is not None and len(p_sub):
+                p_agg, _ = pb.predict(p_sub, df_in, feats_v2)
+                pg_p = p_agg["pilot_goal_share"].to_numpy(float)
+                # Combine task & pilot goal share (50/50 balanced blend when pilot predictions exist).
+                pg = np.where(np.isfinite(pg_p), 0.5 * pg + 0.5 * pg_p, pg)
+            return pk, pg
+
+        era_oof_k[te_i], era_oof_g[te_i] = _predict_v2(te_era_m4, p_te)
+
+        tr_ct = task_chip_times[task_chip_times["task_key"].isin(tr_eval_keys)][["chip_id", "time"]].drop_duplicates()
+        era_tr_wx = t_eval.iloc[tr_i].set_index("task_key")
+
+        for mid in active_mids:
+            wx_raw = fc_raw_wx[mid]
+            te_present = [idx for idx, tk in zip(te_i, te_keys) if tk in wx_raw.index]
+            if not te_present:
+                continue
+            te_sub_df = t_eval.loc[te_present].copy()
+            te_sub_keys = set(te_sub_df["task_key"])
+            p_te_m = p_te[p_te["task_key"].isin(te_sub_keys)]
+
+            # Mode 1: raw hourly forecast
+            diag_r = fc_raw_diag[mid]
+            te_wx_r = wx_raw.loc[te_sub_df["task_key"]]
+            sub_r = sub_bundle.predict_task_features(
+                diag_r["lead_panel"][diag_r["lead_panel"]["task_key"].isin(te_sub_keys)],
+                diag_r["pack_panel"][diag_r["pack_panel"]["task_key"].isin(te_sub_keys)],
+                pd.Index(te_sub_df["task_key"]),
+                diag_r["task_window_h"],
+            )
+            df_r = te_sub_df[base_strict + ["task_key", "event_key", "site_id"]].merge(
+                te_wx_r, left_on="task_key", right_index=True, how="left",
+            ).merge(sub_r, left_on="task_key", right_index=True, how="left")
+            oof_preds[(mid, "raw")][0][te_present], oof_preds[(mid, "raw")][1][te_present] = _predict_v2(df_r, p_te_m)
+
+            # Mode 2: hourly_qm (chip-hour QM fitted strictly on training-fold chip-hours)
+            hqm = RW.fit_hourly_qmaps(fc_raw_tables[mid], era_tables, tr_ct, min_pairs=40)
+            if hqm:
+                qm_tbls = RW.apply_hourly_qmaps(fc_raw_tables[mid], hqm, include_wind=True)
+                seg_te_m = seg_eval[seg_eval["task_key"].isin(te_sub_keys)]
+                te_wx_q, diag_q = RW.extract_hourly_route_features(
+                    te_sub_df, seg_te_m, qm_tbls, include_terrain=True, include_land=False, return_panels=True,
+                )
+                sub_q = sub_bundle.predict_task_features(
+                    diag_q["lead_panel"], diag_q["pack_panel"], pd.Index(te_sub_df["task_key"]), diag_q["task_window_h"],
+                )
+                df_q = te_sub_df[base_strict + ["task_key", "event_key", "site_id"]].merge(
+                    te_wx_q, left_on="task_key", right_index=True, how="left",
+                ).merge(sub_q, left_on="task_key", right_index=True, how="left")
+                oof_preds[(mid, "hourly_qm")][0][te_present], oof_preds[(mid, "hourly_qm")][1][te_present] = _predict_v2(df_q, p_te_m)
+            else:
+                oof_preds[(mid, "hourly_qm")][0][te_present] = oof_preds[(mid, "raw")][0][te_present]
+                oof_preds[(mid, "hourly_qm")][1][te_present] = oof_preds[(mid, "raw")][1][te_present]
+
+            # Mode 3: feature_qm (task-level feature QM on training-fold matched tasks)
+            tr_matched = [tk for tk in tr_eval_keys if tk in wx_raw.index]
+            df_fq = df_r.copy()
+            if len(tr_matched) >= 25:
+                src_tr = wx_raw.loc[tr_matched]
+                ref_tr = era_tr_wx.loc[tr_matched]
+                for col in qm_feature_cols:
+                    if col in src_tr and col in ref_tr and col in df_fq:
+                        qm_f = fit_quantile_map(src_tr[col].to_numpy(float), ref_tr[col].to_numpy(float), min_pairs=25)
+                        if qm_f is not None:
+                            df_fq[col] = apply_quantile_map(df_fq[col].to_numpy(float), qm_f)
+            oof_preds[(mid, "feature_qm")][0][te_present], oof_preds[(mid, "feature_qm")][1][te_present] = _predict_v2(df_fq, p_te_m)
+
+    # Score individual models and blends.
+    e2e_rows = [{"model": "era5_reanalysis_1h", "mode": "reanalysis", **_task_eval_metrics(t_eval, era_oof_k, era_oof_g)}]
+    for mid in active_mids:
+        for mode in modes:
+            pk, pg = oof_preds[(mid, mode)]
+            met = _task_eval_metrics(t_eval, pk, pg)
+            ok_m = np.isfinite(pk) & t_eval["winner_kmh"].notna().to_numpy()
+            era_pair = _task_eval_metrics(t_eval.loc[ok_m], era_oof_k[ok_m], era_oof_g[ok_m]) if ok_m.any() else {}
+            rel = (
+                round(met["winner_time_mae_min"] / max(era_pair["winner_time_mae_min"], 1.0), 4)
+                if met.get("winner_time_mae_min") and era_pair.get("winner_time_mae_min")
+                else None
+            )
+            e2e_rows.append({
+                "model": mid, "mode": mode, "wind_cov": wind_cov.get(mid), **met,
+                "era5_pair_time_mae_min": era_pair.get("winner_time_mae_min"),
+                "rel_time_mae_vs_era5": rel,
+            })
+
+    wind_global_w = (wind_cv.get("clean_wind_hierarchy") or {}).get("global") or {}
+    comp_global_w = multivar_weights.get("global") or {}
+
+    blend_cv: dict[str, Any] = {}
+    blend_preds: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
+    for mode in modes:
+        K_mat = np.column_stack([oof_preds[(m, mode)][0] for m in active_mids])
+        G_mat = np.column_stack([oof_preds[(m, mode)][1] for m in active_mids])
+        valid_row = np.isfinite(K_mat).sum(axis=1) >= 2
+        if not valid_row.any():
+            continue
+        sub_t = t_eval.loc[valid_row].reset_index(drop=True)
+        Km, Gm = K_mat[valid_row], G_mat[valid_row]
+        strategies: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        with np.errstate(all="ignore"):
+            strategies["equal_mean"] = (np.nanmean(Km, axis=1), np.nanmean(Gm, axis=1))
+            strategies["median"] = (np.nanmedian(Km, axis=1), np.nanmedian(Gm, axis=1))
+        for sname, wdict in (("wind_weighted", wind_global_w), ("multivar_weighted", comp_global_w)):
+            if not wdict:
+                continue
+            wv = np.array([wdict.get(m, 0.0) for m in active_mids], dtype=float)
+            ok_k, ok_g = np.isfinite(Km), np.isfinite(Gm)
+            wk, wg = np.where(ok_k, wv[None, :], 0.0), np.where(ok_g, wv[None, :], 0.0)
+            pk = np.where(wk.sum(axis=1) > 0, (np.where(ok_k, Km, 0.0) * wk).sum(axis=1) / np.maximum(wk.sum(axis=1), 1e-9), np.nan)
+            pg = np.where(wg.sum(axis=1) > 0, (np.where(ok_g, Gm, 0.0) * wg).sum(axis=1) / np.maximum(wg.sum(axis=1), 1e-9), np.nan)
+            strategies[sname] = (pk, pg)
+        blend_cv[mode] = {sname: _task_eval_metrics(sub_t, pk, pg) for sname, (pk, pg) in strategies.items()}
+        blend_cv[mode]["era5_reanalysis_1h"] = _task_eval_metrics(sub_t, era_oof_k[valid_row], era_oof_g[valid_row])
+        for sname, (pk, pg) in strategies.items():
+            fk, fg = np.full(len(t_eval), np.nan), np.full(len(t_eval), np.nan)
+            fk[valid_row], fg[valid_row] = pk, pg
+            blend_preds[(sname, mode)] = (fk, fg)
+
+    def _best_blend(mode_name: str) -> tuple[str | None, float]:
+        bm = blend_cv.get(mode_name) or {}
+        for key in ("multivar_weighted", "wind_weighted", "equal_mean"):
+            if key in bm and bm[key].get("winner_time_mae_min") is not None:
+                return key, float(bm[key]["winner_time_mae_min"])
+        return None, float("inf")
+
+    mode_maes = {m: _best_blend(m)[1] for m in modes if m in blend_cv}
+    rec_mode = min(mode_maes, key=mode_maes.get) if mode_maes else "raw"
+    rec_strat = _best_blend(rec_mode)[0]
+    ref_blend = (rec_strat, rec_mode) if rec_strat else None
+
+    paired_rows = paired_task_comparisons(t_eval, (era_oof_k, era_oof_g), oof_preds, blend_preds, ref_blend)
+    apply_test = next(
+        (r for r in paired_rows if r["comparison"] == "blend_mode_vs_raw" and r["a"] == f"{rec_strat}/{rec_mode}"),
+        None,
+    )
+    rec_apply = bool(rec_mode != "raw" and apply_test is not None and apply_test["time_significant"] and apply_test["time_diff_min"] < 0)
+
+    # Fit final full-sample chip-hour QMs per model for export.
+    all_eval_ct = task_chip_times[["chip_id", "time"]].drop_duplicates()
+    full_hqms: dict[str, Any] = {}
+    for mid in active_mids:
+        full_hqms[mid] = {
+            "parcel_excess_c": float((trigger_cv.get(mid) or {}).get("recommended_excess_c", 1.0)),
+            "wind_cov": wind_cov.get(mid),
+            "hourly_quantile_maps": RW.fit_hourly_qmaps(fc_raw_tables[mid], era_tables, all_eval_ct, min_pairs=40),
+        }
+
+    cal_v2 = {
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "from_year": from_year,
+        "levels_native_1h_share": era_diag["levels_native_1h_share"],
+        "recommended_qm_mode": rec_mode,
+        "recommended_strategy": rec_strat,
+        "recommended_apply": rec_apply,
+        "recommended_apply_test": apply_test,
+        "blend_cv_by_mode": blend_cv,
+        "paired_bootstrap": paired_rows,
+        "models": full_hqms,
+    }
+
+    e2e_df = pd.DataFrame(e2e_rows)
+    e2e_df.to_csv(v2_out / "task_v2_e2e_scores.csv", index=False)
+    pd.DataFrame(paired_rows).to_csv(v2_out / "task_v2_paired_bootstrap.csv", index=False)
+    (v2_out / "task_v2_blend_cv.json").write_text(json.dumps(blend_cv, indent=2), encoding="utf-8")
+    (v2_out / "hourly_forecast_calibration.json").write_text(json.dumps(cal_v2, indent=2), encoding="utf-8")
+    return e2e_df, blend_cv, cal_v2
+
+
 # ── Optional experiment: regional high-res models at thermal centroid vs chip centre ─
 
 def run_regional_centroid_check(
@@ -1890,6 +2265,10 @@ def main() -> None:
     parser.add_argument("--wind-only", action="store_true", help="only run Pillar 1 offline re-scoring on cached wind parquets (0 API calls)")
     parser.add_argument("--download-only", action="store_true", help="only download/update thermodynamic caches for --models")
     parser.add_argument("--skip-download", action="store_true", help="run all 4 pillars offline using cached wind + thermo parquets")
+    parser.add_argument("--backfill-route-wind", action="store_true", help="download any 2022+ task route chip-hours missing from hist_forecast/ wind caches")
+    parser.add_argument("--task-v2", action="store_true", help="also run Pillar 4b: hourly Task Model v2 + chip-hour Quantile Mapping CV")
+    parser.add_argument("--task-v2-only", action="store_true", help="run only Pillar 4b (hourly Task Model v2 on cached forecasts, loading existing trigger/wind weights if present)")
+    parser.add_argument("--thermal-rows", type=int, default=400_000, help="crossings sample for Task v2 in-fold climb_prob sub-model (default 400k; 0 to skip)")
     parser.add_argument("--regional-centroid-check", type=int, default=0, help="sample N regional wind groups to compare centroid vs chip centre (default 0)")
     args = parser.parse_args()
     local_api = FWW.is_local_api_url(args.api_url)
@@ -1903,6 +2282,38 @@ def main() -> None:
     selected = THERMO_MODELS if args.models == "all" else [MODEL_BY_ID[m.strip()] for m in args.models.split(",") if m.strip() in MODEL_BY_ID]
     if not selected:
         raise SystemExit(f"No valid models in --models={args.models!r}. Valid: {list(MODEL_BY_ID)}")
+
+    if args.backfill_route_wind:
+        print("=== Backfilling missing 2022+ task route chip-hours in hist_forecast/ ===", flush=True)
+        backfill_route_wind_caches(
+            args.db, selected, from_year=args.from_year, pause=pause_s,
+            api_url=args.api_url, timeout=args.timeout, batch_chips=args.batch_chips, max_sites=args.max_sites,
+        )
+        if args.download_only:
+            return
+
+    if args.task_v2_only:
+        thermo_tables = {spec["id"]: load_cached_thermo(thermo_dir, spec) for spec in selected}
+        trigger_cv = json.loads((out / "parcel_trigger_cv.json").read_text(encoding="utf-8")) if (out / "parcel_trigger_cv.json").exists() else {}
+        w_cv = json.loads((out / "wind_clean_cv.json").read_text(encoding="utf-8")) if (out / "wind_clean_cv.json").exists() else {}
+        mw_payload = json.loads((out / "forecast_multivar_weights.json").read_text(encoding="utf-8")) if (out / "forecast_multivar_weights.json").exists() else {}
+        print("\n=== Pillar 4b: Hourly Task Model v2 & Chip-Hour Quantile Mapping (5-fold CV) ===", flush=True)
+        v2_df, v2_blend, v2_cal = evaluate_tasks_v2_and_hourly_qm(
+            args.db, selected, thermo_tables, trigger_cv, w_cv, mw_payload, args.from_year, out,
+            thermal_rows=args.thermal_rows,
+        )
+        if len(v2_df):
+            cols = [c for c in ["model", "mode", "wind_cov", "tasks_time", "winner_time_mae_min", "within_15_min", "goal_share_mae_pts", "rel_time_mae_vs_era5"] if c in v2_df]
+            print(v2_df[cols].to_string(index=False), flush=True)
+        if v2_blend:
+            print(f"\nTask v2 recommended QM mode: {v2_cal.get('recommended_qm_mode')} (apply={v2_cal.get('recommended_apply')})", flush=True)
+            for mode, strats in v2_blend.items():
+                print(f"  [{mode}]", flush=True)
+                for sname, met in strats.items():
+                    if met.get("tasks_time"):
+                        print(f"    {sname:18s}: time_MAE={met['winner_time_mae_min']:.2f} min  <=15m={met['within_15_min']:.1%}  goal_MAE={met.get('goal_share_mae_pts', float('nan')):.2f} pts", flush=True)
+        print(f"\nSaved Task v2 forecast verification to {out / 'task_v2'}", flush=True)
+        return
 
     if args.wind_only:
         print("=== Pillar 1: Offline re-scoring cached winds vs IGC truth_wind_groups ===", flush=True)
@@ -2000,6 +2411,23 @@ def main() -> None:
                     flag = " *" if r["time_significant"] else ""
                     print(f"    {r['a']:30s} vs {r['b']:30s}: {r['time_diff_min']:+.2f} min [{lo:+.2f}, {hi:+.2f}]  n={r['tasks']}{flag}", flush=True)
             print("  (* = 95% CI excludes 0)", flush=True)
+
+    if args.task_v2:
+        print("\n=== Pillar 4b: Hourly Task Model v2 & Chip-Hour Quantile Mapping (5-fold CV) ===", flush=True)
+        v2_df, v2_blend, v2_cal = evaluate_tasks_v2_and_hourly_qm(
+            args.db, selected, thermo_tables, trigger_cv, w_cv, mw_payload, args.from_year, out,
+            thermal_rows=args.thermal_rows,
+        )
+        if len(v2_df):
+            cols = [c for c in ["model", "mode", "wind_cov", "tasks_time", "winner_time_mae_min", "within_15_min", "goal_share_mae_pts", "rel_time_mae_vs_era5"] if c in v2_df]
+            print(v2_df[cols].to_string(index=False), flush=True)
+        if v2_blend:
+            print(f"\nTask v2 recommended QM mode: {v2_cal.get('recommended_qm_mode')} (apply={v2_cal.get('recommended_apply')})", flush=True)
+            for mode, strats in v2_blend.items():
+                print(f"  [{mode}]", flush=True)
+                for sname, met in strats.items():
+                    if met.get("tasks_time"):
+                        print(f"    {sname:18s}: time_MAE={met['winner_time_mae_min']:.2f} min  <=15m={met['within_15_min']:.1%}  goal_MAE={met.get('goal_share_mae_pts', float('nan')):.2f} pts", flush=True)
 
     if args.regional_centroid_check > 0:
         print(f"\n=== Optional regional centroid vs chip-centre check (n={args.regional_centroid_check}) ===", flush=True)

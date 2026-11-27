@@ -30,6 +30,7 @@ flowchart LR
         wind["Wind check (11)"]
         task["Task model v1 (13)"]
         fcw["Forecast weights and<br/>verification (14, 16)"]
+        task2["Task model v2: 1 h route<br/>+ pilot model (17)"]
     end
 
     subgraph serve["Serving"]
@@ -52,6 +53,12 @@ flowchart LR
     weather --> wind
     om --> fcw
     truth --> fcw
+    basics --> task2
+    weather --> task2
+    terrain --> task2
+    truth --> task2
+    labels --> task2
+    fcw --> task2
     thermal -->|web data| web
     task -->|task_model.json| web
     task --> api
@@ -72,9 +79,12 @@ flowchart TB
     grid["pta/grid.py<br/>global grid: chips and cells"]
     terr["pta/terrain.py<br/>DEM, cell terrain, sun on slopes"]
     truthp["pta/igc_truth.py<br/>thermal winds, glide winds, ceilings"]
+    rwx["pta/route_weather.py<br/>1 h route weather, flight wind,<br/>MacCready kinematics, hourly QM"]
 
     igc -.->|fixes| flight
     grid --> terr
+    grid --> rwx
+    terr --> rwx
 
     bf["scripts/build_flights.py"] --> igc
     bf --> flight
@@ -84,7 +94,9 @@ flowchart TB
     bit["scripts/build_igc_truth.py"] --> truthp
     bit --> flight
     bit --> terr
+    tm2["scripts/task_model_v2.py"] --> rwx
     era["scripts/era5*.py, task_model.py,<br/>forecast_*.py, wind_check.py"] --> grid
+    era --> rwx
     fc["api/forecast.py"] --> grid
 ```
 
