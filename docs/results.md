@@ -2,7 +2,7 @@
 
 What each step has produced on the full database, in the order the notebooks run. Numbers are copied from the notebooks' output; `results/` holds the statistics and maps generated from the database itself (notebook 12). Both are refreshed every 10 to 15 commits.
 
-Last update: 24 November 2026 (15 added).
+Last update: 26 November 2026 (16 added).
 
 ## Database
 
@@ -130,3 +130,38 @@ Calibrated multi-variable ground-truth dataset built directly from the 5 s `fixe
 - **Clean wind (`truth_wind_groups`, `31,701` groups; `truth_glide_wind`, `12,944` groups):** combining the Huber velocity hodograph and air-relative integer-turn drift shrinks the speed bias against ERA5 in `free air + middle` from `−0.531 m/s` (legacy endpoint drift) to `−0.387 m/s` (`−0.279 m/s` hodograph-only) and raises speed correlation across every band (`0.402 → 0.429` near ground, `0.603 → 0.612` free air). Cross-checking against `12,217` independent multi-heading glide-wind groups confirms clean thermal wind agrees with glides to **`+0.067 m/s`**, whereas ERA5 overestimates boundary-layer wind by **`+0.391 m/s`**.
 - **Calibrated ASL top-of-lift (`truth_ceiling`, `13,202` chip-hours, `265` airspace-capped flagged):** excluding airspace caps (`12,882` chip-hours), correlation with ERA5 jumps from `0.61` (notebook 09) to **`0.663`** above ERA5 ground, **`0.804`** in metres ASL, and **`0.809`** against `min(BLH, cloud_base)`. Median gap `ERA5 BLH − p90 ceiling` shrinks from `365 m` to `242 m`, and **day-to-day within-site correlation rises from `0.64` to `0.683`** across `124` sites with `5+` days.
 - **Core climb strength & competition task speed (`truth_tasks`, `1,811` completed tasks):** IGC-measured 60 s core climb (`task_core60_p75_ms`) is the single strongest physical correlate of official winner speed (`r = +0.556`, ahead of full-thermal mean `+0.525`, ASL ceiling `+0.408`, and route-projected tailwind `+0.331`).
+
+## Forecast models vs IGC truth (16)
+
+The 9 archived Open-Meteo forecast models scored on 2022+ competitions against the IGC truth of notebook 15, and against ERA5 on the same rows: 72,754 chip-hours with thermodynamic targets (222 sites, 2,128 chips). `rel` is the model's error divided by ERA5's on identical rows (below 1 = better than ERA5). Ceiling, climb and task scores are out of fold, with whole competitions held out (5 folds).
+
+| Model | Wind groups | Wind rel | Ceiling rel (best variant) | Climb rel | Tasks | Winner's time, raw | Full QM | Time rel (best mode) |
+|---|---|---|---|---|---|---|---|---|
+| ECMWF IFS | 13,770 | 0.923 | **1.142** (native min(BLH, LCL)) | **0.990** | 1,279 | 15.89 min | 15.99 min | **1.021** |
+| GFS | 17,069 | **0.914** | 1.472 (native min(BLH, LCL)) | 1.002 | 1,511 | 16.82 min | 16.62 min | 1.053 |
+| ICON | 15,174 | 0.970 | 1.312 (parcel, tuned) | 1.002 | 1,385 | 16.94 min | 16.67 min | 1.060 |
+| GEM | 15,165 | 0.932 | 1.415 (parcel, tuned) | 1.009 | 1,344 | 17.05 min | 16.71 min | 1.066 |
+| ECMWF AIFS | 10,616 | 0.936 | 1.339 (parcel, tuned) | 1.006 | 1,024 | 16.12 min | 16.06 min | 1.047 |
+| ICON-EU | 9,118 | 0.951 | 1.291 (parcel, +1.0 °C) | 1.017 | 736 | 17.19 min | 16.82 min | 1.042 |
+| ICON-D2 | 4,233 | 1.014 | 1.287 (parcel, +1.0 °C) | 1.024 | 367 | 16.99 min | 16.40 min | 1.064 |
+| AROME | 4,725 | 0.973 | 1.440 (parcel, +1.0 °C) | 1.018 | 398 | 15.93 min | 15.44 min | 1.020 |
+| HRDPS | 431 | 1.013 | 1.308 (parcel, tuned) | 1.077 | 49 | 11.72 min | 9.55 min | 1.013 |
+
+- **Wind (clean thermal wind, free air + middle):** 7 of the 9 models match the pilots better than ERA5, GFS (vector error 2.11 m/s) and ECMWF IFS (2.15 m/s) best. Speed bias −0.17 to −0.69 m/s; 62% (ICON-D2) to 78% (HRDPS) of directions within 30°.
+- **Ceiling (multi-pilot top of lift in metres ASL):** no model matches ERA5. The best is ECMWF IFS with the lower of its native boundary layer and the condensation level: 575 m RMSE, day-to-day correlation within a site 0.72. Every model puts the ceiling too high (bias of its best variant +120 to +380 m). Tuning the parcel's trigger excess per model lowers the bias but not the RMSE; for ECMWF IFS, ICON-EU, ICON-D2 and AROME the default +1.0 °C does better than the tuned value.
+- **Climb strength (`core60_p75`):** every model is at ERA5 parity (0.99 to 1.02; R² 0.14 to 0.21), HRDPS worse on 355 groups. The forecasts add nothing over ERA5 about how strong the climbs are.
+- **Tasks (`task_v1` trained on ERA5, run on each model's route weather):** no model beats ERA5. ECMWF IFS raw gives 15.89 min against 15.57 min on ERA5 for the same tasks (+2%). Full-weather quantile mapping to ERA5 helps most models by 0.2 to 0.6 min (GEM, GFS, ICON, ICON-EU, ICON-D2, AROME) but not ECMWF IFS (+0.1 min); mapping the thermodynamics alone makes GFS and GEM worse. HRDPS's 9.55 min are 49 easy tasks (ERA5 gives 9.43 min on them), not a better model.
+
+Blends on the 1,385 tasks with 2+ models (winner's time error, out of fold):
+
+| Blend | Raw | Thermo QM | Full QM |
+|---|---|---|---|
+| Equal mean | 16.30 min | 16.33 min | 16.11 min |
+| Median | 16.33 min | 16.40 min | 16.18 min |
+| Clean-wind weighted | 16.26 min | 16.31 min | 16.08 min |
+| Multi-variable weighted | 16.22 min | 16.25 min | 16.09 min |
+| ERA5, same tasks | 15.72 min | | |
+
+Reading: replacing the reanalysis with a forecast costs only 2 to 7% of the winner's time error (2% for ECMWF IFS and AROME), so most of the 16 minutes is the task model's own error, not the forecast's; better forecasts have little left to gain there. The best blend (full QM, multi-variable weights) is 0.2 min better than the raw equal mean, inside the per-strategy 95% intervals, and relative to ERA5 it is no better than ECMWF IFS alone (1.024 against 1.021). The composite weights were nearly flat (8 to 19%) and gave HRDPS 9% on 49 tasks.
+
+This run predates the paired bootstrap and the sample-size-shrunk composite weights now in `scripts/forecast_multivar_eval.py`; `forecast_weights.json` was not changed. The next run of section 5 tells whether the full QM and blend gains are significant on identical tasks.
