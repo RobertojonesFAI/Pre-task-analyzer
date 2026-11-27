@@ -15,6 +15,9 @@ Evaluates all 9 archived forecast models across four physical pillars without re
             leakage-free `task_v1` folds on each model's historical route weather: raw vs
             monotone quantile-mapped (thermo-only QM and full-weather QM to ERA5), comparing
             equal mean, median, clean-wind weights, and multi-variable composite weights.
+            Every gain is tested with a paired bootstrap on identical tasks (whole competitions
+            resampled), and quantile mapping is only recommended when its gain is significant.
+            Composite weights shrink each pillar's skill toward the median by sample size.
 
 Thermodynamic historical forecasts are cached per model in `DB/weather/hist_forecast_thermo/`
 with 14-day window batching and clean hourly/daily Open-Meteo quota pausing.
@@ -61,6 +64,11 @@ MAX_WINDOW_DAYS = FWW.MAX_WINDOW_DAYS
 BATCH_CHIPS = FWW.BATCH_CHIPS
 CHECKPOINT_EVERY = 20
 SHRINKAGE_K = 20.0
+# Composite weights: each pillar's rel_rmse_vs_era5 is shrunk toward the median across models
+# by n / (n + k), where n is that model's sample in the pillar (groups, or tasks for "task").
+# A model with k samples in a pillar keeps half of its own deviation from the median.
+COMPOSITE_SHRINK_N = {"wind": 500.0, "ceiling": 500.0, "climb": 500.0, "task": 100.0}
+PAIRED_BOOTSTRAP_ITERS = 2000
 PARCEL_EXCESS_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5)
 QM_PROBS = np.array(
     [0.01, 0.03, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
@@ -808,6 +816,9 @@ def evaluate_clean_wind(
 
     cv_res = FWW.run_grouped_cv(g, active_ids, k_folds=5) if len(active_ids) >= 2 else {"error": "fewer than 2 cached wind models"}
     cv_res["vs_glide_wind"] = glide_scores
+    # Sample size per model on free air + middle, used to shrink the composite wind pillar.
+    fm_rows = scores_df[scores_df["band"] == "free+middle"] if len(scores_df) else scores_df
+    cv_res["free_middle_groups"] = {str(r.model): int(r.groups) for r in fm_rows.itertuples(index=False)} if len(fm_rows) else {}
     best_beta = float(cv_res.get("median_beta", 4.0))
     d_fm = g[g["band"].isin(["free air", "middle"])]
     cv_res["clean_wind_hierarchy"] = FWW.fit_hierarchy(d_fm, active_ids, beta=best_beta, shrink_k=SHRINKAGE_K) if active_ids else {}
@@ -1244,15 +1255,160 @@ def _assemble_task_tables(
     }
 
 
+def _winner_time_err(df_eval: pd.DataFrame, pred_kmh: np.ndarray) -> np.ndarray:
+    """Absolute winner time error in minutes per task (NaN where there is no prediction or no winner)."""
+    err = np.full(len(df_eval), np.nan)
+    ok = np.isfinite(pred_kmh) & df_eval["winner_kmh"].notna().to_numpy()
+    if ok.any():
+        pk = np.maximum(5.0, pred_kmh[ok])
+        yh = df_eval["winner_h"].to_numpy(float)[ok]
+        km = df_eval["ss_km"].to_numpy(float)[ok]
+        err[ok] = np.abs(yh - km / pk) * 60.0
+    return err
+
+
+def _goal_err(df_eval: pd.DataFrame, pred_goal: np.ndarray) -> np.ndarray:
+    """Absolute goal share error in points per task (NaN where missing)."""
+    err = np.full(len(df_eval), np.nan)
+    ok = np.isfinite(pred_goal) & df_eval["goal_share"].notna().to_numpy()
+    if ok.any():
+        err[ok] = np.abs(df_eval["goal_share"].to_numpy(float)[ok] - np.clip(pred_goal[ok], 0.0, 1.0)) * 100.0
+    return err
+
+
+def paired_bootstrap_diff(
+    events: np.ndarray,
+    err_a: np.ndarray,
+    err_b: np.ndarray,
+    n_iter: int = PAIRED_BOOTSTRAP_ITERS,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Mean of (err_a - err_b) over the tasks both cover, with a 95% CI from resampling whole
+    competitions (event_key clusters). Negative means A is better. `p_a_not_better` is the share
+    of resamples where A's mean error is not below B's (a one-sided bootstrap p-value)."""
+    ok = np.isfinite(err_a) & np.isfinite(err_b)
+    if not ok.any():
+        return {"tasks": 0}
+    d = err_a[ok] - err_b[ok]
+    uniq, inv = np.unique(np.asarray(events)[ok].astype(str), return_inverse=True)
+    out: dict[str, Any] = {
+        "tasks": int(ok.sum()),
+        "events": int(len(uniq)),
+        "mean_a": round(float(err_a[ok].mean()), 3),
+        "mean_b": round(float(err_b[ok].mean()), 3),
+        "mean_diff": round(float(d.mean()), 3),
+    }
+    if len(uniq) < 3:
+        out.update({"ci95": [out["mean_diff"], out["mean_diff"]], "p_a_not_better": None, "significant": False})
+        return out
+    # Resampling events with replacement = multinomial multiplicities per event; the statistic is
+    # the pooled task mean (sum of differences / number of tasks) of each resample.
+    sum_d = np.bincount(inv, weights=d)
+    cnt = np.bincount(inv).astype(float)
+    rng = np.random.default_rng(seed)
+    mult = rng.multinomial(len(uniq), np.full(len(uniq), 1.0 / len(uniq)), size=n_iter).astype(float)
+    stats = (mult @ sum_d) / np.maximum(mult @ cnt, 1.0)
+    lo, hi = np.percentile(stats, [2.5, 97.5])
+    out.update({
+        "ci95": [round(float(lo), 3), round(float(hi), 3)],
+        "p_a_not_better": round(float(np.mean(stats >= 0.0)), 4),
+        "significant": bool(hi < 0.0 or lo > 0.0),
+    })
+    return out
+
+
+def shrink_pillar(rel: dict[str, float], n: dict[str, float], k: float) -> dict[str, float]:
+    """Shrink each model's relative RMSE toward the median across models by n / (n + k)."""
+    if not rel:
+        return {}
+    prior = float(np.median(list(rel.values())))
+    out = {}
+    for mid, r in rel.items():
+        n_m = max(float(n.get(mid) or 0.0), 0.0)
+        out[mid] = (n_m * r + k * prior) / (n_m + k)
+    return out
+
+
+def paired_task_comparisons(
+    t_eval: pd.DataFrame,
+    era_pred: tuple[np.ndarray, np.ndarray],
+    model_preds: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]],
+    blend_preds: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]],
+    reference_blend: tuple[str, str] | None,
+    n_iter: int = PAIRED_BOOTSTRAP_ITERS,
+) -> list[dict[str, Any]]:
+    """Paired, competition-clustered bootstrap of winner time and goal share errors.
+
+    `model_preds` and `blend_preds` map (name, mode) to full-length out-of-fold (kmh, goal)
+    predictions aligned with `t_eval` (NaN where not covered). Each row compares A against B on
+    exactly the tasks both cover:
+      blend_mode_vs_raw   every blend strategy under thermo_qm / full_qm vs the same strategy raw
+      blend_vs_equal_raw  every blend vs the simplest baseline (raw equal_mean)
+      blend_vs_era5       every blend vs task_v1 on ERA5
+      model_mode_vs_raw   each model's thermo_qm / full_qm vs its own raw
+      model_vs_era5       each model (every mode) vs ERA5
+      model_vs_blend      each model (every mode) vs `reference_blend` (the recommended blend)
+    """
+    evs = t_eval["event_key"].astype(str).to_numpy()
+    cache: dict[tuple[str, str, str], tuple[np.ndarray, np.ndarray]] = {}
+
+    def errs(kind: str, name: str, mode: str) -> tuple[np.ndarray, np.ndarray]:
+        key = (kind, name, mode)
+        if key not in cache:
+            src = era_pred if kind == "era5" else (model_preds if kind == "model" else blend_preds)[(name, mode)]
+            cache[key] = (_winner_time_err(t_eval, src[0]), _goal_err(t_eval, src[1]))
+        return cache[key]
+
+    rows: list[dict[str, Any]] = []
+
+    def add(comparison: str, a: tuple[str, str, str], b: tuple[str, str, str]) -> None:
+        ta, ga = errs(*a)
+        tb, gb = errs(*b)
+        tm = paired_bootstrap_diff(evs, ta, tb, n_iter=n_iter)
+        if not tm.get("tasks"):
+            return
+        gm = paired_bootstrap_diff(evs, ga, gb, n_iter=n_iter)
+        rows.append({
+            "comparison": comparison,
+            "a": f"{a[1]}/{a[2]}", "b": f"{b[1]}/{b[2]}",
+            "tasks": tm["tasks"], "events": tm["events"],
+            "time_mae_a_min": tm["mean_a"], "time_mae_b_min": tm["mean_b"],
+            "time_diff_min": tm["mean_diff"], "time_diff_ci95": tm.get("ci95"),
+            "time_p_a_not_better": tm.get("p_a_not_better"), "time_significant": tm.get("significant"),
+            "goal_diff_pts": gm.get("mean_diff"), "goal_diff_ci95": gm.get("ci95"),
+            "goal_significant": gm.get("significant"),
+        })
+
+    era = ("era5", "era5_reanalysis", "reanalysis")
+    blend_modes = sorted({m for _, m in blend_preds})
+    blend_names = sorted({s for s, _ in blend_preds})
+    for sname in blend_names:
+        for mode in blend_modes:
+            if (sname, mode) not in blend_preds:
+                continue
+            if mode != "raw" and (sname, "raw") in blend_preds:
+                add("blend_mode_vs_raw", ("blend", sname, mode), ("blend", sname, "raw"))
+            # equal_mean under QM vs equal_mean raw is already a blend_mode_vs_raw row.
+            if sname != "equal_mean" and ("equal_mean", "raw") in blend_preds:
+                add("blend_vs_equal_raw", ("blend", sname, mode), ("blend", "equal_mean", "raw"))
+            add("blend_vs_era5", ("blend", sname, mode), era)
+
+    for mid, mode in sorted(model_preds):
+        if mode != "raw" and (mid, "raw") in model_preds:
+            add("model_mode_vs_raw", ("model", mid, mode), ("model", mid, "raw"))
+        add("model_vs_era5", ("model", mid, mode), era)
+        if reference_blend is not None and reference_blend in blend_preds:
+            add("model_vs_blend", ("model", mid, mode), ("blend", *reference_blend))
+    return rows
+
+
 def _task_eval_metrics(df_eval: pd.DataFrame, pred_kmh: np.ndarray, pred_goal: np.ndarray) -> dict[str, Any]:
     out: dict[str, Any] = {}
     ok_k = np.isfinite(pred_kmh) & df_eval["winner_kmh"].notna().to_numpy()
     if ok_k.any():
         yk = df_eval["winner_kmh"].to_numpy(float)[ok_k]
         pk = np.maximum(5.0, pred_kmh[ok_k])
-        yh = df_eval["winner_h"].to_numpy(float)[ok_k]
-        km = df_eval["ss_km"].to_numpy(float)[ok_k]
-        err_min = np.abs(yh - km / pk) * 60.0
+        err_min = _winner_time_err(df_eval, pred_kmh)[ok_k]
         evs = df_eval["event_key"].astype(str).to_numpy()[ok_k]
         lo, hi = FWW.cluster_bootstrap_ci(evs, err_min, lambda x: float(np.nanmean(x)), n_iter=500)
         out.update({
@@ -1412,6 +1568,7 @@ def evaluate_tasks_and_calibration(
 
     best_mode_by_model: dict[str, str] = {}
     task_rel_by_model: dict[str, float] = {}
+    task_n_by_model: dict[str, float] = {}
     for mid in active_mids:
         mode_scores = {}
         for mode in ("raw", "thermo_qm", "full_qm"):
@@ -1430,16 +1587,19 @@ def evaluate_tasks_and_calibration(
                 "era5_pair_time_mae_min": era_pair.get("winner_time_mae_min"),
                 "rel_time_mae_vs_era5": rel,
             })
-            mode_scores[mode] = (met.get("winner_time_mae_min", float("inf")), rel)
+            mode_scores[mode] = (met.get("winner_time_mae_min", float("inf")), rel, met.get("tasks_time", 0))
         best_m = min(mode_scores, key=lambda k: mode_scores[k][0])
         best_mode_by_model[mid] = best_m
         if mode_scores[best_m][1] is not None:
             task_rel_by_model[mid] = float(mode_scores[best_m][1])
+            task_n_by_model[mid] = float(mode_scores[best_m][2])
 
     # Derive multi-pillar composite global/regional/site weights and evaluate blends out-of-fold.
     wind_hier = wind_cv.get("clean_wind_hierarchy") or {}
     wind_rel = wind_hier.get("global_rel_rmse") or {}
+    wind_n = {k: float(v) for k, v in (wind_cv.get("free_middle_groups") or {}).items()}
     ceil_rel: dict[str, float] = {}
+    ceil_n: dict[str, float] = {}
     if len(ceil_scores):
         for mid, grp in ceil_scores.groupby("model"):
             pref = grp[grp["variant"].isin(["native_min_blh_lcl", "parcel_cv_tuned"])]
@@ -1447,25 +1607,38 @@ def evaluate_tasks_and_calibration(
             best_row = use.dropna(subset=["rel_rmse_vs_era5"]).sort_values("rel_rmse_vs_era5").head(1)
             if len(best_row):
                 ceil_rel[str(mid)] = float(best_row["rel_rmse_vs_era5"].iloc[0])
+                ceil_n[str(mid)] = float(best_row["groups"].iloc[0])
     climb_rel: dict[str, float] = {}
+    climb_n: dict[str, float] = {}
     if len(climb_scores):
         for r in climb_scores.dropna(subset=["rel_rmse_vs_era5"]).itertuples(index=False):
             climb_rel[str(r.model)] = float(r.rel_rmse_vs_era5)
+            climb_n[str(r.model)] = float(r.groups)
 
-    # Composite relative skill: weighted mean of available pillar rel_rmse_vs_era5
+    # Shrink each pillar toward its median across models by sample size, so a model scored on a
+    # few hundred groups or a few dozen tasks (e.g. HRDPS) cannot earn a large weight by chance.
+    pillar_rel = {"wind": wind_rel, "ceiling": ceil_rel, "climb": climb_rel, "task": task_rel_by_model}
+    pillar_n = {"wind": wind_n, "ceiling": ceil_n, "climb": climb_n, "task": task_n_by_model}
+    # Without a stored sample size (an older wind_clean_cv.json), a pillar is left unshrunk.
+    pillar_shrunk = {
+        p: shrink_pillar(rel, pillar_n[p], COMPOSITE_SHRINK_N[p]) if pillar_n[p] else dict(rel)
+        for p, rel in pillar_rel.items()
+    }
+
+    # Composite relative skill: weighted mean of available (shrunk) pillar rel_rmse_vs_era5
     # (0.35 clean wind + 0.25 top-of-lift + 0.25 core60 climb + 0.15 end-to-end task speed).
     pillar_weights = {"wind": 0.35, "ceiling": 0.25, "climb": 0.25, "task": 0.15}
     composite_rel: dict[str, float] = {}
     pillar_breakdown: dict[str, dict[str, float | None]] = {}
+    pillar_breakdown_shrunk: dict[str, dict[str, float | None]] = {}
+    pillar_samples: dict[str, dict[str, int | None]] = {}
     for spec in selected:
         mid = spec["id"]
-        vals = {
-            "wind": wind_rel.get(mid),
-            "ceiling": ceil_rel.get(mid),
-            "climb": climb_rel.get(mid),
-            "task": task_rel_by_model.get(mid),
-        }
-        pillar_breakdown[mid] = {k: (round(v, 4) if v is not None else None) for k, v in vals.items()}
+        raw_vals = {p: pillar_rel[p].get(mid) for p in pillar_weights}
+        vals = {p: pillar_shrunk[p].get(mid) for p in pillar_weights}
+        pillar_breakdown[mid] = {k: (round(v, 4) if v is not None else None) for k, v in raw_vals.items()}
+        pillar_breakdown_shrunk[mid] = {k: (round(v, 4) if v is not None else None) for k, v in vals.items()}
+        pillar_samples[mid] = {p: (int(pillar_n[p][mid]) if mid in pillar_n[p] else None) for p in pillar_weights}
         avail = [(pillar_weights[k], v) for k, v in vals.items() if v is not None]
         if avail:
             composite_rel[mid] = sum(w * v for w, v in avail) / sum(w for w, _ in avail)
@@ -1476,6 +1649,7 @@ def evaluate_tasks_and_calibration(
 
     # Blend comparison on 2022+ tasks where >= 2 models are available.
     blend_cv: dict[str, Any] = {}
+    blend_preds: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
     for mode in ("raw", "thermo_qm", "full_qm"):
         K_mat = np.column_stack([oof_preds[(m, mode)][0] for m in active_mids])
         G_mat = np.column_stack([oof_preds[(m, mode)][1] for m in active_mids])
@@ -1504,17 +1678,38 @@ def evaluate_tasks_and_calibration(
             for sname, (pk, pg) in strategies.items()
         }
         blend_cv[mode]["era5_reanalysis"] = _task_eval_metrics(sub_t, era_oof_k[valid_row], era_oof_g[valid_row])
+        # Full-length copies aligned with t_eval for the paired tests below.
+        for sname, (pk, pg) in strategies.items():
+            full_k = np.full(len(t_eval), np.nan)
+            full_g = np.full(len(t_eval), np.nan)
+            full_k[valid_row] = pk
+            full_g[valid_row] = pg
+            blend_preds[(sname, mode)] = (full_k, full_g)
 
-    # Determine whether quantile mapping actually beats raw on out-of-fold equal_mean/multivar winner_time_mae_min.
-    def _best_blend_mae(mode_name: str) -> float:
+    # Pick the QM mode whose preferred blend has the lowest out-of-fold winner time MAE ...
+    def _best_blend(mode_name: str) -> tuple[str | None, float]:
         bm = blend_cv.get(mode_name) or {}
         for key in ("multivar_weighted", "wind_weighted", "equal_mean"):
             if key in bm and bm[key].get("winner_time_mae_min") is not None:
-                return float(bm[key]["winner_time_mae_min"])
-        return float("inf")
+                return key, float(bm[key]["winner_time_mae_min"])
+        return None, float("inf")
 
-    mode_maes = {m: _best_blend_mae(m) for m in ("raw", "thermo_qm", "full_qm") if m in blend_cv}
+    mode_maes = {m: _best_blend(m)[1] for m in ("raw", "thermo_qm", "full_qm") if m in blend_cv}
     recommended_qm_mode = min(mode_maes, key=mode_maes.get) if mode_maes else "raw"
+    recommended_strategy = _best_blend(recommended_qm_mode)[0]
+    reference_blend = (recommended_strategy, recommended_qm_mode) if recommended_strategy else None
+
+    # ... and test every gain with a paired, competition-clustered bootstrap on identical tasks.
+    paired_rows = paired_task_comparisons(
+        t_eval, (era_oof_k, era_oof_g), oof_preds, blend_preds, reference_blend,
+    )
+    # Apply QM only when its gain over the same blend without QM is significant (95% CI below 0).
+    apply_test = next(
+        (r for r in paired_rows
+         if r["comparison"] == "blend_mode_vs_raw" and r["a"] == f"{recommended_strategy}/{recommended_qm_mode}"),
+        None,
+    )
+    recommended_apply = bool(recommended_qm_mode != "raw" and apply_test is not None and apply_test["time_significant"] and apply_test["time_diff_min"] < 0)
 
     # Fit final full-sample quantile maps per model for export in forecast_calibration.json.
     era_all_eval = t_eval.set_index("task_key")
@@ -1542,10 +1737,14 @@ def evaluate_tasks_and_calibration(
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "from_year": from_year,
         "recommended_qm_mode": recommended_qm_mode,
-        "recommended_apply": recommended_qm_mode != "raw",
+        "recommended_strategy": recommended_strategy,
+        "recommended_apply": recommended_apply,
+        "recommended_apply_rule": "QM mode with the lowest blend MAE, applied only if its paired 95% CI vs the same blend raw is below 0",
+        "recommended_apply_test": apply_test,
         "thermo_qm_features": THERMO_QM_FEATURES,
         "all_qm_features": ALL_QM_FEATURES,
         "blend_cv_by_mode": blend_cv,
+        "paired_bootstrap": paired_rows,
         "models": cal_models,
     }
 
@@ -1556,6 +1755,9 @@ def evaluate_tasks_and_calibration(
         "beta": beta,
         "pillar_weights": pillar_weights,
         "pillar_rel_rmse": pillar_breakdown,
+        "pillar_samples": pillar_samples,
+        "pillar_shrink_n": COMPOSITE_SHRINK_N,
+        "pillar_rel_rmse_shrunk": pillar_breakdown_shrunk,
         "composite_rel_rmse": {k: round(v, 4) for k, v in composite_rel.items()},
         "global": {k: round(v, 4) for k, v in comp_global_w.items()},
         "by_region": wind_hier.get("by_region") or {},
@@ -1565,6 +1767,7 @@ def evaluate_tasks_and_calibration(
 
     e2e_df = pd.DataFrame(e2e_rows)
     e2e_df.to_csv(out_dir / "task_e2e_scores.csv", index=False)
+    pd.DataFrame(paired_rows).to_csv(out_dir / "paired_bootstrap.csv", index=False)
     (out_dir / "bias_correction_cv.json").write_text(json.dumps(blend_cv, indent=2), encoding="utf-8")
     (out_dir / "forecast_calibration.json").write_text(json.dumps(cal_payload, indent=2), encoding="utf-8")
     (out_dir / "forecast_multivar_weights.json").write_text(json.dumps(multivar_weights_payload, indent=2), encoding="utf-8")
@@ -1777,6 +1980,26 @@ def main() -> None:
             for sname, met in strats.items():
                 if met.get("tasks_time"):
                     print(f"    {sname:18s}: time_MAE={met['winner_time_mae_min']:.2f} min  <=15m={met['within_15_min']:.1%}  goal_MAE={met.get('goal_share_mae_pts', float('nan')):.2f} pts", flush=True)
+        paired = cal_payload.get("paired_bootstrap") or []
+        if paired:
+            ref = f"{cal_payload.get('recommended_strategy')}/{cal_payload.get('recommended_qm_mode')}"
+            print("\nPaired bootstrap (A − B winner time MAE on identical tasks, competitions resampled; all rows in paired_bootstrap.csv):", flush=True)
+            shown = {
+                "blend_mode_vs_raw": lambda r: True,
+                "blend_vs_equal_raw": lambda r: r["a"] == ref,
+                "blend_vs_era5": lambda r: r["a"] == ref,
+                "model_vs_blend": lambda r: r["a"].endswith("/raw"),
+            }
+            for comp, keep in shown.items():
+                rows = [r for r in paired if r["comparison"] == comp and keep(r)]
+                if not rows:
+                    continue
+                print(f"  [{comp}]", flush=True)
+                for r in rows:
+                    lo, hi = r["time_diff_ci95"]
+                    flag = " *" if r["time_significant"] else ""
+                    print(f"    {r['a']:30s} vs {r['b']:30s}: {r['time_diff_min']:+.2f} min [{lo:+.2f}, {hi:+.2f}]  n={r['tasks']}{flag}", flush=True)
+            print("  (* = 95% CI excludes 0)", flush=True)
 
     if args.regional_centroid_check > 0:
         print(f"\n=== Optional regional centroid vs chip-centre check (n={args.regional_centroid_check}) ===", flush=True)
